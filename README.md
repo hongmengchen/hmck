@@ -30,7 +30,7 @@ hmck  我的命令行小工具
 │ 检查并更新 ~/.npmrc 里的 registry token
 │ ~/.local/bin/npm-token
 │
-│ hmck   0.5.0 · 最新 0.5.0           ✓ 已是最新
+│ hmck   0.5.1 · 最新 0.5.1           ✓ 已是最新
 │ 管理这些命令行小工具，包括它自己
 │ ~/.local/bin/hmck
 

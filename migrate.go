@@ -90,8 +90,8 @@ func moveBinary(src, dst, running string) error {
 		if !fileExists(dst) {
 			return copyBinary(src, dst)
 		}
-		// 统一目录已有一份：只有旧位置这份更新时才覆盖它
-		if isNewer(version, installedVersion(dst)) {
+		// 只有旧位置这份更新时才覆盖统一目录里的
+		if newerFile(src, dst) {
 			return copyBinary(src, dst)
 		}
 		return nil
@@ -100,12 +100,9 @@ func moveBinary(src, dst, running string) error {
 		// 统一目录里的这份正在运行，删掉旧位置的就够了
 		return removeFile(src)
 	}
-	if fileExists(dst) {
-		sv, dv := installedVersion(src), installedVersion(dst)
-		if sv == "" || (dv != "" && !isNewer(sv, dv)) {
-			// 统一目录里的不比旧的差，旧副本直接清掉
-			return removeFile(src)
-		}
+	if fileExists(dst) && !newerFile(src, dst) {
+		// 统一目录里的不比旧的差，旧副本直接清掉
+		return removeFile(src)
 	}
 	if err := os.Rename(src, dst); err == nil {
 		return nil
@@ -114,6 +111,22 @@ func moveBinary(src, dst, running string) error {
 		return err
 	}
 	return removeFile(src)
+}
+
+// newerFile 只比文件的修改时间，不运行程序取版本，迁移要尽量快
+func newerFile(src, dst string) bool {
+	si, err := os.Stat(src)
+	if err != nil {
+		return false
+	}
+	di, err := os.Stat(dst)
+	if err != nil {
+		return true
+	}
+	if si.ModTime().Equal(di.ModTime()) {
+		return si.Size() > di.Size()
+	}
+	return si.ModTime().After(di.ModTime())
 }
 
 func copyBinary(src, dst string) error {

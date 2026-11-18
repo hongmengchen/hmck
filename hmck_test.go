@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -581,5 +582,29 @@ func TestMigrateSkipsWhenDisabled(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(legacy, "hmck")); err != nil {
 		t.Error("旧文件不该被删")
+	}
+}
+
+func TestNewerFile(t *testing.T) {
+	dir := t.TempDir()
+	older := filepath.Join(dir, "older")
+	newer := filepath.Join(dir, "newer")
+	for _, p := range []string{older, newer} {
+		if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(older, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if newerFile(older, newer) {
+		t.Error("旧文件不该被当成更新的")
+	}
+	if !newerFile(newer, older) {
+		t.Error("新文件应该被当成更新的")
+	}
+	if newerFile(older, filepath.Join(dir, "missing")) != true {
+		t.Error("目标不存在时应当复制")
 	}
 }
