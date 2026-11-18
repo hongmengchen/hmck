@@ -221,6 +221,7 @@ func fetchTool(st toolState) (string, string, error) {
 			return "", "", err
 		}
 	}
+	_ = os.Remove(cached) // Windows 上 rename 不能覆盖已存在的文件
 	if err := os.Rename(tmp, cached); err != nil {
 		os.Remove(tmp)
 		return "", "", err
