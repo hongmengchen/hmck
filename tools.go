@@ -38,8 +38,9 @@ var registry = []tool{
 		Platforms: []string{
 			"darwin/amd64", "darwin/arm64",
 			"linux/amd64", "linux/arm64",
-			"windows/amd64",
+			"windows/amd64", "windows/arm64",
 		},
+		Checksums:   true,
 		Skill:       true,
 		PostInstall: []string{"skill", "--quiet"},
 	},

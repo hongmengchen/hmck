@@ -60,8 +60,11 @@ func TestAssetNamesAndSupport(t *testing.T) {
 			kube = t0
 		}
 	}
-	if supports(kube, "windows", "arm64") {
-		t.Error("kube-token 没有 windows/arm64 发布")
+	if !supports(kube, "windows", "arm64") {
+		t.Error("kube-token 应当支持 windows/arm64")
+	}
+	if !kube.Checksums {
+		t.Error("kube-token 发布带 checksums.txt，应当开启校验")
 	}
 }
 

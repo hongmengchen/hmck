@@ -1,5 +1,9 @@
 # hmck
 
+[![CI](https://github.com/hongmengchen/hmck/actions/workflows/ci.yml/badge.svg)](https://github.com/hongmengchen/hmck/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/hongmengchen/hmck)](https://github.com/hongmengchen/hmck/releases)
+[![License](https://img.shields.io/github/license/hongmengchen/hmck)](LICENSE)
+
 一个入口管理我自己的命令行小工具：看版本、安装、升级、直接启动，顺手把 agent skill 装好。
 
 目前托管：
@@ -15,18 +19,18 @@
 ```
 $ hmck
 hmck  我的命令行小工具
-  3 个工具 · 1 个可更新 · 检查于 15:42:07
+  3 个工具 · 0 个可更新 · 检查于 15:42:07
   a 自动下载最新版 [关]    A 自动安装最新版 [关]
 
-│ kube-token   0.5.0 · 最新 0.5.0      ✓ 已是最新
+│ kube-token   0.6.1 · 最新 0.6.1      ✓ 已是最新
 │ 粘贴新 token 替换 kubeconfig 里的旧值
 │ ~/.local/bin/kube-token
 │
-│ npm-token   0.3.0 → 0.3.1            ↑ 可更新
+│ npm-token   0.4.0 · 最新 0.4.0       ✓ 已是最新
 │ 检查并更新 ~/.npmrc 里的 registry token
 │ ~/.local/bin/npm-token
 │
-│ hmck   0.4.0 · 最新 0.4.0           ✓ 已是最新
+│ hmck   0.4.2 · 最新 0.4.2           ✓ 已是最新
 │ 管理这些命令行小工具，包括它自己
 │ ~/.local/bin/hmck
 
@@ -65,6 +69,8 @@ Windows 的 Git Bash / MSYS 里也能直接用上面的 `install.sh`（会装成
 
 有 Go 环境可以直接 `go install github.com/hongmengchen/hmck@latest`。
 
+macOS / Linux 默认装到 `~/.local/bin`（root 下是 `/usr/local/bin`）；安装脚本会从 release 的 `checksums.txt` 校验 SHA-256。
+
 安装完会自动跑一次 `hmck skill`，把 agent 用法说明写到 `~/.claude/skills/`。
 
 ## 用法
@@ -83,7 +89,7 @@ hmck skill                # 给 hmck 和已安装的工具装 agent skill
 
 版本检测：已安装版本读 `<tool> version`；最新版看 GitHub `releases/latest` 的跳转（不消耗 API 限流），失败再退回 API。
 
-安装位置：工具已经在 PATH 里就原地升级；没装就装到 hmck 旁边（通常 `~/.local/bin`）。
+安装位置：工具已经在 PATH 里就原地升级；没装就装到 hmck 旁边（通常 `~/.local/bin`）。内置工具的 release 都带 `checksums.txt`，安装和升级会校验 SHA-256。
 
 升级安全：先下载到缓存目录（`~/Library/Caches/hmck/downloads` 或 `~/.cache/hmck/downloads`），
 有 `checksums.txt` 就校验 SHA-256，再复制到目标目录、原子 rename 覆盖；校验或下载失败不会动原文件。
@@ -154,9 +160,18 @@ hmck skill --no-tools   # 只装 hmck 自己的
 ## 开发
 
 ```bash
+gofmt -l .
+go vet ./...
 go test ./...
 go build -o hmck .
 ```
+
+push / PR 会跑 CI，发版前也会先跑测试。
+
+## 参与
+
+- [CHANGELOG](CHANGELOG.md) · [CONTRIBUTING](CONTRIBUTING.md)
+- 安全问题请按 [SECURITY](SECURITY.md) 走私密报告，不要公开贴真实配置或内部地址
 
 ## License
 
