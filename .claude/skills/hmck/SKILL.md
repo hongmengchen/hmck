@@ -40,11 +40,13 @@ hmck version
   "latest": "0.1.1",
   "path": "~/.local/bin/npm-token",
   "status": "可升级 0.1.1",
-  "upgradable": true
+  "upgradable": true,
+  "updated_at": "2026-11-15T21:12:03+08:00"
 }
 ```
 
 `installed` 为空表示没装；`latest` 为空表示没查到（`error` 里写原因，常见是网络或 API 限流）。
+`updated_at` 是上一次版本更新时间：hmck 装/升级成功时记进 `state.json`；不是 hmck 装的，用二进制文件的修改时间。
 版本检测：已装版本读 `<tool> version`；最新版看 GitHub `releases/latest` 的跳转，失败再退回 API。
 
 ## 2. 安装 / 升级 / 启动
@@ -71,7 +73,7 @@ hmck run npm-token --help       # 直接启动工具，后面的参数原样传�
 TUI（只有用户自己在终端里用）：`↑↓` 选择，`enter` 启动（没装则安装；选到 hmck 自己是升级），
 `u` 升级选中的，`U` 一键升级所有可升级的，`s` 装/刷新 agent skill，`r` 重新检查，`q` 退出。
 卡片上版本号前的图标就是状态：`✓` 已是最新、`↑` 可更新（`旧 → 新`）、`↓` 已下载待安装、
-`○` 未安装、`!` 查不到最新版或没有对应平台的发布。
+`○` 未安装、`!` 查不到最新版或没有对应平台的发布。第一行右边是上次版本更新时间。
 
 列表上方有两个开关，按 `a` / `A` 切换并立即写进配置：
 
@@ -109,9 +111,12 @@ hmck rm my-tool                      # 只删自定义工具
 
 | 系统 | 路径 |
 | --- | --- |
-| macOS | `~/Library/Application Support/hmck/tools.json`、`config.json` |
-| Linux | `~/.config/hmck/tools.json`、`config.json` |
-| Windows | `%AppData%\hmck\tools.json`、`config.json` |
+| macOS | `~/Library/Application Support/hmck/tools.json`、`config.json`、`state.json` |
+| Linux | `~/.config/hmck/tools.json`、`config.json`、`state.json` |
+| Windows | `%AppData%\hmck\tools.json`、`config.json`、`state.json` |
+
+`state.json` 只记每个工具上一次版本更新的版本号和时间（`{"<key>": {"version": "...", "updated_at": "..."}}`），
+删了不影响使用，下次升级会重新写。
 
 加完立刻可以 `hmck install <key>` / `hmck upgrade` / `hmck list` / TUI 里管理。
 

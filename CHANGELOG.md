@@ -2,6 +2,14 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.7.0] - 2026-11-18
+
+### 新增
+
+- 记录每个工具上一次版本更新时间：hmck 装/升级成功后写进 `state.json`，TUI 第一行右边显示「刚刚更新 / 3 小时前更新 / 12 天前更新」，超过一个月显示日期
+- 不是 hmck 装的工具用二进制文件的修改时间兜底，所以装好的工具都有时间可看
+- `hmck list --json` 增加 `updated_at` 字段（RFC 3339）
+
 ## [0.6.0] - 2026-11-18
 
 ### 变更

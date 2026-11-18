@@ -267,6 +267,7 @@ func installTool(st toolState) (string, error) {
 	}
 
 	runPostInstall(t, target)
+	recordUpdate(t.Key, ver) // 记下版本更新时间，TUI 里显示成「3 天前更新」
 	return ver, nil
 }
 

@@ -451,6 +451,7 @@ func (m *tuiModel) markUpdated(key, newVer string) {
 		if newVer != "" {
 			m.states[i].Installed = newVer
 			m.states[i].Latest = newVer
+			m.states[i].UpdatedAt = time.Now()
 			m.states[i].CheckErr = ""
 		}
 		if !m.states[i].Tool.Self {
@@ -856,6 +857,14 @@ func (m tuiModel) renderCard(st toolState, selected bool, cols cardCols) string 
 
 	head := nameStyle.Render(theme.Pad(st.Tool.Key, cols.name)) + "  " +
 		theme.Pad(m.versionCell(st), cols.ver)
+
+	// 第一行右边标出上一次版本更新时间，窄屏放不下就不显示
+	if st.Installed != "" && !st.UpdatedAt.IsZero() {
+		t := updatedText(st.UpdatedAt, time.Now())
+		if gap := w - lipgloss.Width(head) - lipgloss.Width(t); gap >= 2 {
+			head += strings.Repeat(" ", gap) + stylePath.Render(t)
+		}
+	}
 
 	desc := st.Tool.Desc
 	if st.Tool.Custom {

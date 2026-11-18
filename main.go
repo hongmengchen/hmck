@@ -8,12 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.6.0"
+var version = "0.7.0"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -104,6 +105,7 @@ type listItem struct {
 	Path       string `json:"path,omitempty"`
 	Status     string `json:"status"`
 	Upgradable bool   `json:"upgradable"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
 	Custom     bool   `json:"custom,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
@@ -177,10 +179,15 @@ func runList(args []string) int {
 
 func toListItem(st toolState) listItem {
 	label, _ := st.Status()
+	updated := ""
+	if !st.UpdatedAt.IsZero() {
+		updated = st.UpdatedAt.Format(time.RFC3339)
+	}
 	return listItem{
 		Key: st.Tool.Key, Name: st.Tool.Name,
 		Installed: st.Installed, Latest: st.Latest, Path: shortenHome(st.Path),
-		Status: label, Upgradable: st.Behind(), Custom: st.Tool.Custom, Error: st.CheckErr,
+		Status: label, Upgradable: st.Behind(), UpdatedAt: updated,
+		Custom: st.Tool.Custom, Error: st.CheckErr,
 	}
 }
 

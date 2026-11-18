@@ -150,6 +150,20 @@ func TestLatestTagRedirectAndFallback(t *testing.T) {
 	}
 }
 
+// isolateConfig 把配置目录指到临时目录，并清掉进程里的记录缓存，
+// 免得测试把 state.json 写进真实配置
+func isolateConfig(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	old := userConfigDir
+	userConfigDir = func() (string, error) { return dir, nil }
+	resetHistory()
+	t.Cleanup(func() {
+		userConfigDir = old
+		resetHistory()
+	})
+}
+
 func fakeReleaseServer(t *testing.T, payload []byte, checksum string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -165,6 +179,7 @@ func fakeReleaseServer(t *testing.T, payload []byte, checksum string) *httptest.
 }
 
 func TestInstallToolWithChecksum(t *testing.T) {
+	isolateConfig(t)
 	payload := bytes.Repeat([]byte("BINARY"), 40_000) // > 100KB
 	sum := sha256.Sum256(payload)
 	srv := fakeReleaseServer(t, payload, hex.EncodeToString(sum[:]))
@@ -203,6 +218,7 @@ func TestInstallToolWithChecksum(t *testing.T) {
 }
 
 func TestInstallToolChecksumMismatch(t *testing.T) {
+	isolateConfig(t)
 	payload := bytes.Repeat([]byte("BINARY"), 40_000)
 	srv := fakeReleaseServer(t, payload, strings.Repeat("0", 64))
 	defer srv.Close()
@@ -228,6 +244,7 @@ func TestInstallToolChecksumMismatch(t *testing.T) {
 }
 
 func TestInstallToolUnsupportedPlatform(t *testing.T) {
+	isolateConfig(t)
 	tl := tool{Key: "fake", Repo: "o/r", Binary: "fake", Platforms: []string{"plan9/mips"}}
 	if _, err := installTool(toolState{Tool: tl, Latest: "1.0.0"}); err == nil {
 		t.Error("不支持的平台应当报错")
@@ -235,6 +252,7 @@ func TestInstallToolUnsupportedPlatform(t *testing.T) {
 }
 
 func TestUpgradeAllCmd(t *testing.T) {
+	isolateConfig(t)
 	payload := bytes.Repeat([]byte("BINARY"), 40_000)
 	srv := fakeReleaseServer(t, payload, "")
 	defer srv.Close()

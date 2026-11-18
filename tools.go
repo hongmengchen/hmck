@@ -226,8 +226,9 @@ func installedVersion(path string) string {
 type toolState struct {
 	Tool      tool
 	Path      string
-	Installed string // 已安装版本；空 = 未安装
-	Latest    string // 最新版本；空 = 没查出来
+	Installed string    // 已安装版本；空 = 未安装
+	Latest    string    // 最新版本；空 = 没查出来
+	UpdatedAt time.Time // 上一次装上/升级的时间；零值 = 不知道
 	CheckErr  string
 }
 
@@ -261,9 +262,11 @@ func inspectLocal(t tool) toolState {
 			st.Path = exe
 		}
 		st.Installed = version
+		st.UpdatedAt = updatedAtFor(t.Key, st.Installed, st.Path)
 	} else if p, ok := findTool(t); ok {
 		st.Path = p
 		st.Installed = installedVersion(p)
+		st.UpdatedAt = updatedAtFor(t.Key, st.Installed, p)
 	}
 	if !supports(t, runtime.GOOS, runtime.GOARCH) {
 		st.CheckErr = fmt.Sprintf("%s 没有 %s/%s 的发布", t.Key, runtime.GOOS, runtime.GOARCH)
