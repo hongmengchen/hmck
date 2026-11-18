@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -18,8 +19,7 @@ var styles = theme.Default
 type tuiState int
 
 const (
-	loading tuiState = iota
-	list
+	list tuiState = iota
 	working
 	result
 )
@@ -46,16 +46,31 @@ type tuiModel struct {
 	cfgErr string            // 开关保存失败时的提示
 	staged map[string]string // 已预下载的版本：tool key -> version
 
+	// 本地扫完就上图，远端最新版在后台逐个回来
+	localReady bool
+	pending    map[string]bool
+	chkCh      chan tea.Msg
+	chkGen     int
+
 	// 一键更新/预下载的进度通道；updGen 防止上一次的残留消息串进来
 	updCh       chan tea.Msg
 	updGen      int
 	batchAction string // “更新”或“预下载”
 }
 
-type inspectDoneMsg struct {
+type localDoneMsg struct {
 	states []toolState
 	err    error
 }
+
+type latestDoneMsg struct {
+	gen int
+	key string
+	ver string
+	err error
+}
+
+type latestClosedMsg struct{ gen int }
 
 type skillDoneMsg struct{ lines []resultLine }
 
@@ -98,21 +113,84 @@ func newTUIModel() tuiModel {
 	sp.Spinner = spinner.Dot
 	sp.Style = styles.Accent
 	cfg, err := loadConfig()
-	m := tuiModel{state: loading, spin: sp, cfg: cfg, staged: map[string]string{}}
+	m := tuiModel{
+		state: list, spin: sp, cfg: cfg,
+		staged:  map[string]string{},
+		pending: map[string]bool{},
+	}
 	if err != nil {
 		m.cfgErr = err.Error()
+	}
+
+	// 工具清单只读本机配置，先摆出来；版本和路径随后补上
+	tools, terr := allTools()
+	if terr != nil {
+		m.configErr = terr.Error()
+	}
+	m.states = make([]toolState, len(tools))
+	for i, t := range tools {
+		m.states[i] = toolState{Tool: t}
 	}
 	return m
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, inspectCmd())
+	return tea.Batch(m.spin.Tick, localInspectCmd(m.toolList()))
 }
 
-func inspectCmd() tea.Cmd {
+func (m tuiModel) toolList() []tool {
+	tools := make([]tool, len(m.states))
+	for i, st := range m.states {
+		tools[i] = st.Tool
+	}
+	return tools
+}
+
+// localInspectCmd 只扫本机，几乎立刻返回，首屏不用等网络
+func localInspectCmd(tools []tool) tea.Cmd {
 	return func() tea.Msg {
-		states, err := inspectAll()
-		return inspectDoneMsg{states: states, err: err}
+		states, err := inspectLocalAll(tools)
+		return localDoneMsg{states: states, err: err}
+	}
+}
+
+// latestCheckCmd 并发问 GitHub，每查到一个就发一条，卡片逐个刷新
+func latestCheckCmd(tools []tool, ch chan tea.Msg, gen int) tea.Cmd {
+	return func() tea.Msg {
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, 4)
+		for _, t := range tools {
+			wg.Add(1)
+			go func(t tool) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				tag, err := latestTag(t.Repo)
+				msg := latestDoneMsg{gen: gen, key: t.Key}
+				if err != nil {
+					msg.err = err
+				} else {
+					msg.ver = strings.TrimPrefix(tag, "v")
+				}
+				select {
+				case ch <- msg:
+				default:
+				}
+			}(t)
+		}
+		wg.Wait()
+		close(ch)
+		return nil // 结束信号由 waitLatest 在通道关闭时发出
+	}
+}
+
+func waitLatest(ch chan tea.Msg, gen int) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return latestClosedMsg{gen: gen}
+		}
+		return msg
 	}
 }
 
@@ -214,23 +292,52 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case spinner.TickMsg:
-		if m.state != loading && m.state != working {
+		if !m.animating() {
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
 
-	case inspectDoneMsg:
+	case localDoneMsg:
 		m.states = msg.states
 		if msg.err != nil {
 			m.configErr = msg.err.Error()
-		} else {
-			m.configErr = ""
 		}
-		m.checkedAt = time.Now()
-		m.state = list
+		m.localReady = true
+		m.checkedAt = time.Time{}
 		m.clampCursor()
+		return m.startLatestCheck()
+
+	case latestDoneMsg:
+		if msg.gen != m.chkGen {
+			return m, nil
+		}
+		if msg.key != "" {
+			for i := range m.states {
+				if m.states[i].Tool.Key != msg.key {
+					continue
+				}
+				if msg.err != nil {
+					m.states[i].CheckErr = msg.err.Error()
+				} else {
+					m.states[i].Latest = msg.ver
+					m.states[i].CheckErr = ""
+				}
+			}
+			delete(m.pending, msg.key)
+		}
+		if m.chkCh == nil {
+			return m, nil
+		}
+		return m, waitLatest(m.chkCh, msg.gen)
+
+	case latestClosedMsg:
+		if msg.gen != m.chkGen {
+			return m, nil
+		}
+		m.pending = map[string]bool{}
+		m.checkedAt = time.Now()
 		return m.afterInspect()
 
 	case skillDoneMsg:
@@ -338,7 +445,7 @@ func (m *tuiModel) markUpdated(key, newVer string) {
 
 func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.state {
-	case loading, working:
+	case working:
 		return m, nil
 
 	case list:
@@ -352,7 +459,7 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 		case "enter":
-			if len(m.states) == 0 {
+			if !m.localReady || len(m.states) == 0 {
 				return m, nil
 			}
 			st := m.states[m.cursor]
@@ -365,10 +472,13 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, launchCmd(st)
 		case "u":
-			if len(m.states) > 0 {
+			if m.localReady && len(m.states) > 0 {
 				return m.startInstall(m.states[m.cursor])
 			}
 		case "U":
+			if !m.localReady {
+				return m, nil
+			}
 			return m.startUpgradeAll()
 		case "a":
 			m.cfg.AutoDownload = !m.cfg.AutoDownload
@@ -395,17 +505,53 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.workText = "正在安装 agent skill…"
 			return m, tea.Batch(m.spin.Tick, skillCmd())
 		case "r":
-			m.state = loading
-			return m, tea.Batch(m.spin.Tick, inspectCmd())
+			return m.refresh()
 		case "q", "esc":
 			return m, tea.Quit
 		}
 
 	case result:
-		m.state = loading
-		return m, tea.Batch(m.spin.Tick, inspectCmd())
+		return m.refresh()
 	}
 	return m, nil
+}
+
+// refresh 原地重扫：先保留当前列表，版本和最新版再一点点补
+func (m tuiModel) refresh() (tea.Model, tea.Cmd) {
+	m.localReady = false
+	m.checkedAt = time.Time{}
+	m.chkGen++ // 丢掉上一轮还没回来的结果
+	m.pending = map[string]bool{}
+	return m, tea.Batch(m.spin.Tick, localInspectCmd(m.toolList()))
+}
+
+// startLatestCheck 把本地已就绪的工具并发问一遍 GitHub
+func (m tuiModel) startLatestCheck() (tea.Model, tea.Cmd) {
+	var targets []tool
+	m.chkGen++
+	m.pending = map[string]bool{}
+	for _, st := range m.states {
+		if st.CheckErr != "" {
+			continue // 平台不支持，没什么可查的
+		}
+		targets = append(targets, st.Tool)
+		m.pending[st.Tool.Key] = true
+	}
+	if len(targets) == 0 {
+		m.checkedAt = time.Now()
+		return m, nil
+	}
+
+	m.chkCh = make(chan tea.Msg, len(targets))
+	ch, gen := m.chkCh, m.chkGen
+	return m, tea.Batch(latestCheckCmd(targets, ch, gen), waitLatest(ch, gen))
+}
+
+func (m tuiModel) animating() bool {
+	if m.state == working {
+		return true
+	}
+	return m.state == list && (!m.localReady || len(m.pending) > 0)
 }
 
 func (m tuiModel) startInstall(st toolState) (tea.Model, tea.Cmd) {
@@ -509,8 +655,6 @@ func (m *tuiModel) clampCursor() {
 func (m tuiModel) View() string {
 	var body string
 	switch m.state {
-	case loading:
-		body = m.viewLoading()
 	case list:
 		body = m.viewList()
 	case working:
@@ -519,11 +663,6 @@ func (m tuiModel) View() string {
 		body = m.viewResult()
 	}
 	return "\n" + body + "\n"
-}
-
-func (m tuiModel) viewLoading() string {
-	return styles.Title.Render("hmck") + styles.Dim.Render("  检查工具版本") + "\n\n" +
-		"  " + m.spin.View() + "  " + styles.Dim.Render("正在问 GitHub 最新版本…")
 }
 
 func (m tuiModel) viewList() string {
@@ -551,6 +690,11 @@ func (m tuiModel) viewList() string {
 		summary += " · 检查于 " + m.checkedAt.Format("15:04:05")
 	}
 	b.WriteString(styles.Dim.Render(summary))
+	if !m.localReady {
+		b.WriteString("  " + m.spin.View() + styles.Dim.Render(" 读取本地工具…"))
+	} else if len(m.pending) > 0 {
+		b.WriteString("  " + m.spin.View() + styles.Dim.Render(" 检查最新版本…"))
+	}
 	b.WriteString("\n")
 	if m.configErr != "" {
 		b.WriteString(styles.Warn.Render("  自定义工具配置有问题: " + theme.Truncate(m.configErr, m.contentWidth())))
@@ -586,17 +730,23 @@ func (m tuiModel) viewSwitches() string {
 
 func (m tuiModel) renderCard(st toolState, selected bool) string {
 	w := m.contentWidth()
-	status, style := statusStyle(st)
+	status, style := m.cardStatus(st)
 	name := st.Tool.Key
 	if st.Tool.Custom {
 		name += styles.Dim.Render(" · 自定义")
 	}
-	head := styles.Text.Render(name) + "   " + styles.Text.Render(versionText(st)) + "   " + style.Render(status)
+	ver := versionText(st)
+	if !m.localReady {
+		ver = "读取中…"
+	}
+	head := styles.Text.Render(name) + "   " + styles.Text.Render(ver) + "   " + style.Render(status)
 
 	line2 := styles.Dim.Render(theme.Truncate(st.Tool.Desc, w))
 
 	var line3 string
 	switch {
+	case !m.localReady:
+		line3 = styles.Dim.Render("正在读取本地安装位置…")
 	case m.staged[st.Tool.Key] != "" && m.staged[st.Tool.Key] == st.Latest:
 		line3 = styles.Good.Render("已下载 " + st.Latest + "，按 u 安装")
 	case st.Path != "":
@@ -612,6 +762,18 @@ func (m tuiModel) renderCard(st toolState, selected bool) string {
 		return styles.CardOn.Render(body)
 	}
 	return styles.CardOff.Render(body)
+}
+
+// cardStatus 本地没扫完或最新版还在路上时，先用转圈代替状态
+func (m tuiModel) cardStatus(st toolState) (string, lipgloss.Style) {
+	switch {
+	case !m.localReady:
+		return m.spin.View() + " 读取中", styles.Dim
+	case m.pending[st.Tool.Key]:
+		return m.spin.View() + " 查询最新版…", styles.Dim
+	default:
+		return statusStyle(st)
+	}
 }
 
 // versionText 把已装和最新都摆在卡片上：0.4.2 → 0.4.3 / 0.4.2 · 最新 0.4.2

@@ -145,19 +145,35 @@ func supports(t tool, goos, goarch string) bool {
 	return false
 }
 
-// installDir 是没在 PATH 里找到时的新工具安装位置：优先 hmck 自己所在目录
-func installDir() (string, error) {
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		if writable(dir) {
-			return dir, nil
-		}
-	}
-	home, err := os.UserHomeDir()
+var userHomeDir = os.UserHomeDir // 测试里替换
+
+// defaultBinDir 是所有工具统一的安装目录：~/.local/bin
+// （Windows 上是 %USERPROFILE%\.local\bin，和 Claude Code、codex 一样的放法）
+func defaultBinDir() (string, error) {
+	home, err := userHomeDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".local", "bin")
+	return filepath.Join(home, ".local", "bin"), nil
+}
+
+// installDir 是新工具的安装位置：跟 hmck 自己放在同一个目录。
+// hmck 装在统一目录（~/.local/bin）时，新工具自然也在那里；
+// 从旧版 Windows 目录启动时不再往里装，直接落到统一目录。
+func installDir() (string, error) {
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = resolved
+		}
+		dir := filepath.Dir(exe)
+		if writable(dir) && !isLegacyPath(exe) {
+			return dir, nil
+		}
+	}
+	dir, err := defaultBinDir()
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -193,7 +209,9 @@ func findTool(t tool) (string, bool) {
 func installedVersion(path string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "version").Output()
+	cmd := exec.CommandContext(ctx, path, "version")
+	cmd.Env = append(os.Environ(), "HMCK_NO_MIGRATE=1") // 只问版本，别让子进程顺手搬家
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
@@ -231,8 +249,8 @@ func (s toolState) Status() (string, string) {
 	}
 }
 
-// inspect 查一个工具的本地版本和远端最新版
-func inspect(t tool) toolState {
+// inspectLocal 只看本机：装在哪、是什么版本，不联网
+func inspectLocal(t tool) toolState {
 	st := toolState{Tool: t}
 	if t.Self {
 		// 正在运行的这一份才是“已安装”的版本；不要去 PATH 里找旧副本
@@ -249,6 +267,14 @@ func inspect(t tool) toolState {
 	}
 	if !supports(t, runtime.GOOS, runtime.GOARCH) {
 		st.CheckErr = fmt.Sprintf("%s 没有 %s/%s 的发布", t.Key, runtime.GOOS, runtime.GOARCH)
+	}
+	return st
+}
+
+// inspectLatest 问 GitHub 最新版；平台不支持时直接原样返回
+func inspectLatest(st toolState) toolState {
+	t := st.Tool
+	if !supports(t, runtime.GOOS, runtime.GOARCH) {
 		return st
 	}
 	tag, err := latestTag(t.Repo)
@@ -257,5 +283,11 @@ func inspect(t tool) toolState {
 		return st
 	}
 	st.Latest = strings.TrimPrefix(tag, "v")
+	st.CheckErr = ""
 	return st
+}
+
+// inspect 查一个工具的本地版本和远端最新版
+func inspect(t tool) toolState {
+	return inspectLatest(inspectLocal(t))
 }

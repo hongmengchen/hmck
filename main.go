@@ -13,11 +13,14 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.4.2"
+var version = "0.5.0"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
 func run(args []string) int {
+	// 旧版装在 %LOCALAPPDATA%\<tool> 的，先把二进制搬到统一目录，配置不动
+	migrateInstallLocations()
+
 	if len(args) == 0 {
 		// 终端里给 TUI；管道里给可 grep 的列表
 		if isTTY(os.Stdin) && isTTY(os.Stdout) {
@@ -181,13 +184,27 @@ func toListItem(st toolState) listItem {
 	}
 }
 
+// inspectAll 一次查完本地和远端；CLI 的 list 用这个
 func inspectAll() ([]toolState, error) {
-	tools, err := allTools()
+	states, err := inspectLocalAll(nil)
+	if err != nil {
+		return states, err
+	}
+	latestAll(states)
+	return states, nil
+}
+
+// inspectLocalAll 只扫本机，不联网；tools 为 nil 时重新读配置
+func inspectLocalAll(tools []tool) ([]toolState, error) {
+	var err error
+	if tools == nil {
+		tools, err = allTools()
+	}
 	states := make([]toolState, len(tools))
 	done := make(chan int, len(tools))
 	for i, t := range tools {
 		go func(i int, t tool) {
-			states[i] = inspect(t)
+			states[i] = inspectLocal(t)
 			done <- i
 		}(i, t)
 	}
@@ -195,6 +212,20 @@ func inspectAll() ([]toolState, error) {
 		<-done
 	}
 	return states, err
+}
+
+// latestAll 并发查所有工具的最新版，就地写回 states
+func latestAll(states []toolState) {
+	done := make(chan int, len(states))
+	for i := range states {
+		go func(i int) {
+			states[i] = inspectLatest(states[i])
+			done <- i
+		}(i)
+	}
+	for range states {
+		<-done
+	}
 }
 
 // ---------- run ----------

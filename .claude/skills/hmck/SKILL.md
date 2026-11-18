@@ -19,8 +19,8 @@ CLI 的每个动作都有对应命令，输出也可以 `--json`。
    npm-token 自己做（它们会自动备份、复验、必要时还原），agent 不要手改文件。
 3. **升级只走 hmck。** 不要用 `go install`、手动下载二进制或改 PATH 来「修好」某个工具；
    `hmck upgrade` 会校验 checksum 并原子替换，路径也保持一致。
-4. **不确定用户要不要装/升级时先问。** 安装和升级会写用户的 `~/.local/bin`（或工具当前所在位置），
-   属于会改系统的动作；看版本、列清单则随便跑。
+4. **不确定用户要不要装/升级时先问。** 安装和升级会写用户的 `~/.local/bin`
+   （Windows 是 `%USERPROFILE%\.local\bin`，或工具当前所在位置），属于会改系统的动作；看版本、列清单则随便跑。
 
 ## 1. 看现状
 
@@ -62,7 +62,7 @@ hmck run npm-token --help       # 直接启动工具，后面的参数原样传�
 目标路径是当前正在运行的可执行文件，和别的工具走同一套下载、checksum 校验、原子替换。
 `hmck run hmck` 会被拒绝——直接运行 `hmck` 即可。
 
-- 工具已经在 PATH 里就原地升级；没装就装到 hmck 旁边（通常 `~/.local/bin`）。
+- 安装目录统一为 `~/.local/bin`（Windows 是 `%USERPROFILE%\.local\bin`）；工具已经在 PATH 里就在原位置升级。旧版 Windows 装在 `%LOCALAPPDATA%\<tool>` 的，第一次运行新版 hmck 会自动搬到统一目录并清理旧 PATH 项，配置和 skill 不动。
 - 升级：下载到同目录临时文件，有 `checksums.txt` 就校验 SHA-256，再原子 rename；
   校验或下载失败不会动原文件。
 - 装完/升级完会跑工具声明的 `post_install`（目前是 `skill --quiet`），agent 的说明跟着更新。

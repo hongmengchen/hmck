@@ -4,7 +4,7 @@
 #
 # 可选参数：
 #   -Version v0.1.0   装指定版本（默认最新）
-#   -BinDir C:\path   装到指定目录（默认 %LOCALAPPDATA%\hmck）
+#   -BinDir C:\path   装到指定目录（默认 %USERPROFILE%\.local\bin，和 npm-token、kube-token 相同）
 param(
     [string]$Version = "",
     [string]$BinDir = ""
@@ -67,7 +67,7 @@ try {
 Remove-Item -Force $sums -ErrorAction SilentlyContinue
 
 if (-not $BinDir) {
-    $BinDir = Join-Path $env:LOCALAPPDATA "hmck"
+    $BinDir = Join-Path $HOME ".local\bin"
 }
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
@@ -81,14 +81,23 @@ try {
 
 Write-Host "已安装: $target"
 
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if (($userPath -split ";") -notcontains $BinDir) {
-    $newPath = if ([string]::IsNullOrEmpty($userPath)) { $BinDir } else { $userPath.TrimEnd(";") + ";" + $BinDir }
-    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-    Write-Host "已把 $BinDir 加到用户 PATH（新开终端生效）"
+# 用户 PATH：统一目录放最前面；旧版 %LOCALAPPDATA%\<tool> 的项去掉
+$legacy = @()
+if ($env:LOCALAPPDATA) {
+    $legacy = @("hmck", "npm-token", "kube-token") | ForEach-Object { (Join-Path $env:LOCALAPPDATA $_).TrimEnd("\") }
 }
-$env:Path = $env:Path.TrimEnd(";") + ";" + $BinDir
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$parts = @()
+if ($userPath) { $parts = @($userPath -split ";" | Where-Object { $_.Trim() -ne "" }) }
+$keep = @($parts | Where-Object { $legacy -notcontains $_.TrimEnd("\") -and $_.TrimEnd("\") -ne $BinDir.TrimEnd("\") })
+$newPath = (@($BinDir) + $keep) -join ";"
+if ($newPath -ne $userPath) {
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    Write-Host "已把 $BinDir 放到用户 PATH 最前面（新开终端生效）"
+}
+$env:Path = $BinDir + ";" + $env:Path
 
+# 跑一次新版 hmck：它会把旧目录里的工具搬到统一目录，配置（%AppData% 等）原样保留
 try { & $target version } catch { }
 
 # 顺手把 agent skill 写到 ~/.claude/skills（失败不影响安装）

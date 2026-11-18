@@ -240,6 +240,14 @@ func installTool(st toolState) (string, error) {
 		}
 		target = filepath.Join(dir, binaryName(t, runtime.GOOS))
 	}
+	if t.Self && isLegacyPath(target) {
+		// 自己刚从旧目录搬过来时，升级直接写到统一目录，别再回到旧的
+		if dir, err := defaultBinDir(); err == nil {
+			if err := os.MkdirAll(dir, 0o755); err == nil {
+				target = filepath.Join(dir, binaryName(t, runtime.GOOS))
+			}
+		}
+	}
 	dir := filepath.Dir(target)
 	if !writable(dir) {
 		return "", fmt.Errorf("%s 不可写（程序在运行？或用 sudo 重试）", dir)
@@ -385,6 +393,7 @@ func runPostInstall(t tool, target string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, target, t.PostInstall...)
+	cmd.Env = append(os.Environ(), "HMCK_NO_MIGRATE=1") // 迁移留到下次用户自己启动时
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	_ = cmd.Run() // 失败不影响升级结果
 }

@@ -363,3 +363,223 @@ func TestDownloadDoneStages(t *testing.T) {
 		t.Errorf("结果行 = %+v", got.resultLines)
 	}
 }
+
+func TestKeysBlockedBeforeLocalScan(t *testing.T) {
+	m := newTUIModel()
+	m.state = list
+	m.localReady = false
+	m.states = []toolState{{Tool: tool{Key: "tool-a"}}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := updated.(tuiModel); got.state != list {
+		t.Errorf("本地还没扫完就响应了 enter: state=%v", got.state)
+	}
+}
+
+func TestLatestResultsArriveOneByOne(t *testing.T) {
+	m := newTUIModel()
+	m.state = list
+	m.localReady = true
+	m.chkGen = 7
+	m.states = []toolState{
+		{Tool: tool{Key: "tool-a"}, Path: "/x/tool-a", Installed: "0.1.0"},
+		{Tool: tool{Key: "tool-b"}, Path: "/x/tool-b", Installed: "0.2.0"},
+	}
+	m.pending = map[string]bool{"tool-a": true, "tool-b": true}
+
+	updated, _ := m.Update(latestDoneMsg{gen: 7, key: "tool-a", ver: "0.3.0"})
+	got := updated.(tuiModel)
+	if got.states[0].Latest != "0.3.0" || got.pending["tool-a"] {
+		t.Fatalf("tool-a 没更新: %+v pending=%v", got.states[0], got.pending)
+	}
+	if !got.states[0].Behind() {
+		t.Error("tool-a 应当显示可更新")
+	}
+	if got.states[1].Latest != "" || !got.pending["tool-b"] {
+		t.Error("tool-b 不应该被 tool-a 的结果影响")
+	}
+	if !got.animating() {
+		t.Error("还有工具在查，应该继续转圈")
+	}
+
+	updated, _ = got.Update(latestDoneMsg{gen: 7, key: "tool-b", ver: "0.2.0"})
+	got = updated.(tuiModel)
+	if len(got.pending) != 0 {
+		t.Errorf("还在等: %v", got.pending)
+	}
+
+	updated, _ = got.Update(latestClosedMsg{gen: 7})
+	got = updated.(tuiModel)
+	if got.checkedAt.IsZero() {
+		t.Error("查完后应该记下检查时间")
+	}
+	if got.animating() {
+		t.Error("都查完了不该再转圈")
+	}
+
+	// 上一轮迟到的结果不能串进来
+	updated, _ = got.Update(latestDoneMsg{gen: 6, key: "tool-a", ver: "9.9.9"})
+	if updated.(tuiModel).states[0].Latest != "0.3.0" {
+		t.Error("旧一轮的结果被采纳了")
+	}
+}
+
+func TestInspectLocalDoesNotAskGitHub(t *testing.T) {
+	tl := tool{
+		Key:       "nope-tool",
+		Binary:    "nope-tool",
+		Repo:      "example/nope",
+		Platforms: []string{runtime.GOOS + "/" + runtime.GOARCH},
+	}
+	st := inspectLocal(tl)
+	if st.Latest != "" {
+		t.Errorf("inspectLocal 不该联网查最新版: %q", st.Latest)
+	}
+	if st.CheckErr != "" {
+		t.Errorf("inspectLocal 不该有网络错误: %s", st.CheckErr)
+	}
+	if st.Installed != "" || st.Path != "" {
+		t.Errorf("没装的东西不该有版本/路径: %+v", st)
+	}
+}
+
+func TestDefaultBinDirIsUnified(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip(err)
+	}
+	got, err := defaultBinDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".local", "bin"); got != want {
+		t.Errorf("defaultBinDir() = %q, want %q", got, want)
+	}
+}
+
+func TestMoveBinary(t *testing.T) {
+	base := t.TempDir()
+	legacy := filepath.Join(base, "legacy")
+	binDir := filepath.Join(base, "bin")
+	for _, d := range []string{legacy, binDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 旧的搬到统一目录，旧文件消失
+	src := filepath.Join(legacy, "tool-a")
+	dst := filepath.Join(binDir, "tool-a")
+	if err := os.WriteFile(src, []byte("a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := moveBinary(src, dst, filepath.Join(base, "other")); err != nil {
+		t.Fatalf("搬旧文件失败: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Error("旧位置的文件应该已经搬走")
+	}
+	if _, err := os.Stat(dst); err != nil {
+		t.Errorf("统一目录里应该有文件: %v", err)
+	}
+
+	// 正在运行的自己：只能复制，旧文件留着
+	run := filepath.Join(legacy, "hmck")
+	runDst := filepath.Join(binDir, "hmck")
+	if err := os.WriteFile(run, []byte("hmck"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := moveBinary(run, runDst, run); err != nil {
+		t.Fatalf("复制运行中的自己失败: %v", err)
+	}
+	if _, err := os.Stat(run); err != nil {
+		t.Error("运行中的旧文件删不掉，应该保留")
+	}
+	if got, err := os.ReadFile(runDst); err != nil || string(got) != "hmck" {
+		t.Errorf("统一目录里的副本不对: %q %v", got, err)
+	}
+
+	// 统一目录里的自己正在运行：旧副本直接清掉
+	other := filepath.Join(legacy, "tool-b")
+	if err := os.WriteFile(other, []byte("b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	otherDst := filepath.Join(binDir, "tool-b")
+	if err := os.WriteFile(otherDst, []byte("b-new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := moveBinary(other, otherDst, otherDst); err != nil {
+		t.Fatalf("清理旧副本失败: %v", err)
+	}
+	if _, err := os.Stat(other); !os.IsNotExist(err) {
+		t.Error("统一目录里的在运行时，旧副本应该清掉")
+	}
+	if got, _ := os.ReadFile(otherDst); string(got) != "b-new" {
+		t.Error("正在运行的统一目录文件不该被覆盖")
+	}
+}
+
+func TestMigrateInstallLocations(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 上会改真实用户 PATH，留给安装脚本验证")
+	}
+	home := t.TempDir()
+	legacy := t.TempDir()
+
+	oldHome := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	defer func() { userHomeDir = oldHome }()
+	oldLegacy := legacyDirsForTest
+	legacyDirsForTest = []string{legacy}
+	defer func() { legacyDirsForTest = oldLegacy }()
+	t.Setenv("HMCK_NO_MIGRATE", "")
+
+	names := []string{"kube-token", "npm-token", "hmck"}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(legacy, name), []byte("bin-"+name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	migrateInstallLocations()
+
+	binDir := filepath.Join(home, ".local", "bin")
+	for _, name := range names {
+		got, err := os.ReadFile(filepath.Join(binDir, name))
+		if err != nil {
+			t.Fatalf("%s 没搬到统一目录: %v", name, err)
+		}
+		if string(got) != "bin-"+name {
+			t.Errorf("%s 内容不对: %q", name, got)
+		}
+		if _, err := os.Stat(filepath.Join(legacy, name)); !os.IsNotExist(err) {
+			t.Errorf("%s 的旧副本应该已经清掉", name)
+		}
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Error("搬空后的旧目录应该删掉")
+	}
+}
+
+func TestMigrateSkipsWhenDisabled(t *testing.T) {
+	legacy := t.TempDir()
+	if err := os.WriteFile(filepath.Join(legacy, "hmck"), []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	oldHome := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	defer func() { userHomeDir = oldHome }()
+	oldLegacy := legacyDirsForTest
+	legacyDirsForTest = []string{legacy}
+	defer func() { legacyDirsForTest = oldLegacy }()
+	t.Setenv("HMCK_NO_MIGRATE", "1")
+
+	migrateInstallLocations()
+
+	if _, err := os.Stat(filepath.Join(home, ".local", "bin", "hmck")); !os.IsNotExist(err) {
+		t.Error("HMCK_NO_MIGRATE 下不该搬任何东西")
+	}
+	if _, err := os.Stat(filepath.Join(legacy, "hmck")); err != nil {
+		t.Error("旧文件不该被删")
+	}
+}

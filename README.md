@@ -22,22 +22,22 @@ hmck  我的命令行小工具
   3 个工具 · 0 个可更新 · 检查于 15:42:07
   a 自动下载最新版 [关]    A 自动安装最新版 [关]
 
-│ kube-token   0.6.1 · 最新 0.6.1      ✓ 已是最新
+│ kube-token   0.6.2 · 最新 0.6.2      ✓ 已是最新
 │ 粘贴新 token 替换 kubeconfig 里的旧值
 │ ~/.local/bin/kube-token
 │
-│ npm-token   0.4.0 · 最新 0.4.0       ✓ 已是最新
+│ npm-token   0.4.1 · 最新 0.4.1       ✓ 已是最新
 │ 检查并更新 ~/.npmrc 里的 registry token
 │ ~/.local/bin/npm-token
 │
-│ hmck   0.4.2 · 最新 0.4.2           ✓ 已是最新
+│ hmck   0.5.0 · 最新 0.5.0           ✓ 已是最新
 │ 管理这些命令行小工具，包括它自己
 │ ~/.local/bin/hmck
 
   ↑↓ 选择  ·  enter 启动/安装  ·  u 升级  ·  U 一键全部更新  ·  s 装 skill  ·  r 重新检查  ·  q 退出
 ```
 
-每个工具都同时显示已装版本和 GitHub 上的最新版本，能升的直接标 `0.1.0 → 0.1.1`。
+打开后先列出本地工具（版本、安装位置），最新版在后台查询；查到哪个就刷新哪张卡片，期间标题栏显示转圈和「检查最新版本…」，不用对着一个空白的加载页等网络。每个工具都同时显示已装版本和 GitHub 上的最新版本，能升的直接标 `0.1.0 → 0.1.1`。
 
 `enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
 
@@ -69,7 +69,7 @@ Windows 的 Git Bash / MSYS 里也能直接用上面的 `install.sh`（会装成
 
 有 Go 环境可以直接 `go install github.com/hongmengchen/hmck@latest`。
 
-macOS / Linux 默认装到 `~/.local/bin`（root 下是 `/usr/local/bin`）；安装脚本会从 release 的 `checksums.txt` 校验 SHA-256。
+macOS / Linux 默认装到 `~/.local/bin`（root 下是 `/usr/local/bin`）；Windows 装到 `%USERPROFILE%\.local\bin`（Git Bash 里就是 `~/.local/bin`），和 npm-token、kube-token 同一个目录。安装脚本会从 release 的 `checksums.txt` 校验 SHA-256。
 
 安装完会自动跑一次 `hmck skill`，把 agent 用法说明写到 `~/.claude/skills/`。
 
@@ -89,7 +89,9 @@ hmck skill                # 给 hmck 和已安装的工具装 agent skill
 
 版本检测：已安装版本读 `<tool> version`；最新版看 GitHub `releases/latest` 的跳转（不消耗 API 限流），失败再退回 API。
 
-安装位置：工具已经在 PATH 里就原地升级；没装就装到 hmck 旁边（通常 `~/.local/bin`）。内置工具的 release 都带 `checksums.txt`，安装和升级会校验 SHA-256。
+安装位置：统一放在 `~/.local/bin`（Windows 是 `%USERPROFILE%\.local\bin`）；hmck 自己装在系统目录（如 `/usr/local/bin`）时，新工具跟着它放在同一目录。工具已经在 PATH 里就在原位置升级。内置工具的 release 都带 `checksums.txt`，安装和升级会校验 SHA-256。
+
+从旧版升级（Windows 以前装在 `%LOCALAPPDATA%\<tool>`）时，第一次运行新版 hmck 会把二进制搬到统一目录，并把用户 PATH 里的旧目录换成新目录。配置不在安装目录里，`%AppData%\hmck`、`%AppData%\kube-token`、`~/.npmrc` 和 `~/.claude/skills` 都原样保留，不需要重新配置。
 
 升级安全：先下载到缓存目录（`~/Library/Caches/hmck/downloads` 或 `~/.cache/hmck/downloads`），
 有 `checksums.txt` 就校验 SHA-256，再复制到目标目录、原子 rename 覆盖；校验或下载失败不会动原文件。
