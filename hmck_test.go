@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -328,20 +329,44 @@ func TestBatchDoneUpdatesModel(t *testing.T) {
 	}
 }
 
-func TestVersionText(t *testing.T) {
+var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func plainText(s string) string { return ansiEscape.ReplaceAllString(s, "") }
+
+// 版本那一格：状态只用一个图标表示，已是最新时不再重复写「最新 x.y.z」
+func TestVersionCell(t *testing.T) {
+	m := newTUIModel()
+	m.localReady = true
+	m.pending = map[string]bool{}
+	m.staged = map[string]string{}
+
 	cases := []struct {
+		name string
 		st   toolState
 		want string
 	}{
-		{toolState{Installed: "0.4.2", Latest: "0.4.2"}, "0.4.2 · 最新 0.4.2"},
-		{toolState{Installed: "0.4.2", Latest: "0.4.3"}, "0.4.2 → 0.4.3"},
-		{toolState{Latest: "0.1.0"}, "未安装 · 最新 0.1.0"},
-		{toolState{Installed: "0.1.0"}, "已装 0.1.0"},
+		{"已是最新", toolState{Path: "/tmp/tool-a", Installed: "0.4.2", Latest: "0.4.2"}, "✓ 0.4.2"},
+		{"可更新", toolState{Path: "/tmp/tool-a", Installed: "0.4.2", Latest: "0.4.3"}, "↑ 0.4.2 → 0.4.3"},
+		{"未安装", toolState{Latest: "0.1.0"}, "○ 未安装"},
+		{"只查到已装版本", toolState{Path: "/tmp/tool-a", Installed: "0.1.0"}, "✓ 0.1.0"},
 	}
 	for _, c := range cases {
-		if got := versionText(c.st); got != c.want {
-			t.Errorf("versionText(%+v) = %q, want %q", c.st, got, c.want)
+		got := plainText(m.versionCell(c.st))
+		if got != c.want {
+			t.Errorf("%s: versionCell = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// 最近一版已下载时换成 ↓，提示按 u 安装
+func TestVersionCellStaged(t *testing.T) {
+	m := newTUIModel()
+	m.localReady = true
+	m.pending = map[string]bool{}
+	m.staged = map[string]string{"tool-a": "0.4.3"}
+	got := plainText(m.versionCell(toolState{Tool: tool{Key: "tool-a"}, Path: "/tmp/tool-a", Installed: "0.4.2", Latest: "0.4.3"}))
+	if !strings.HasPrefix(got, "↓ ") {
+		t.Errorf("已下载应显示 ↓，got %q", got)
 	}
 }
 

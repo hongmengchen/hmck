@@ -14,7 +14,25 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var styles = theme.Default
+var (
+	pal    = theme.Slate()
+	styles = theme.New(pal)
+
+	// 卡片里各列自己的样式：名称、版本、路径、分隔线
+	styleNameOff = lipgloss.NewStyle().Foreground(pal.Text).Bold(true)
+	styleNameOn  = lipgloss.NewStyle().Foreground(pal.Accent).Bold(true)
+	styleVer     = lipgloss.NewStyle().Foreground(pal.Text)
+	styleVerOld  = lipgloss.NewStyle().Foreground(pal.Dim)
+	styleVerNew  = lipgloss.NewStyle().Foreground(pal.Warn).Bold(true)
+	stylePath    = lipgloss.NewStyle().Foreground(pal.Dim)
+	styleRule    = lipgloss.NewStyle().Foreground(pal.Line)
+
+	// 选中的卡片用一条实心竖条，和未选中的细线一眼能分开
+	styleCardOn = lipgloss.NewStyle().
+			Border(lipgloss.Border{Left: "▌"}, false, false, false, true).
+			BorderForeground(pal.Accent).
+			PaddingLeft(1)
+)
 
 type tuiState int
 
@@ -667,6 +685,8 @@ func (m tuiModel) View() string {
 
 func (m tuiModel) viewList() string {
 	var b strings.Builder
+	w := m.contentWidth()
+	cols := m.cardCols()
 	b.WriteString(styles.Title.Render("hmck") + styles.Dim.Render("  我的命令行小工具"))
 	b.WriteString("\n")
 
@@ -680,41 +700,70 @@ func (m tuiModel) viewList() string {
 		}
 	}
 	summary := fmt.Sprintf("  %d 个工具", len(m.states))
-	if behind > 0 {
-		summary += fmt.Sprintf(" · %d 个可更新", behind)
-	}
-	if missing > 0 {
-		summary += fmt.Sprintf(" · %d 个未安装", missing)
+	if behind == 0 && missing == 0 && !m.checkedAt.IsZero() {
+		summary += " · 全部已是最新"
+	} else {
+		if behind > 0 {
+			summary += fmt.Sprintf(" · %d 个可更新", behind)
+		}
+		if missing > 0 {
+			summary += fmt.Sprintf(" · %d 个未安装", missing)
+		}
 	}
 	if !m.checkedAt.IsZero() {
 		summary += " · 检查于 " + m.checkedAt.Format("15:04:05")
 	}
 	b.WriteString(styles.Dim.Render(summary))
-	if !m.localReady {
-		b.WriteString("  " + m.spin.View() + styles.Dim.Render(" 读取本地工具…"))
-	} else if len(m.pending) > 0 {
-		b.WriteString("  " + m.spin.View() + styles.Dim.Render(" 检查最新版本…"))
-	}
 	b.WriteString("\n")
 	if m.configErr != "" {
-		b.WriteString(styles.Warn.Render("  自定义工具配置有问题: " + theme.Truncate(m.configErr, m.contentWidth())))
+		b.WriteString(styles.Warn.Render("  自定义工具配置有问题: " + theme.Truncate(m.configErr, w)))
 		b.WriteString("\n")
 	}
 	b.WriteString(m.viewSwitches())
 	b.WriteString("\n")
 	if m.cfgErr != "" {
-		b.WriteString(styles.Warn.Render("  开关没保存: " + theme.Truncate(m.cfgErr, m.contentWidth())))
+		b.WriteString(styles.Warn.Render("  开关没保存: " + theme.Truncate(m.cfgErr, w)))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
 
 	for i, st := range m.states {
-		b.WriteString(m.renderCard(st, i == m.cursor))
+		b.WriteString(m.renderCard(st, i == m.cursor, cols))
 		b.WriteString("\n")
+		if i < len(m.states)-1 {
+			// 工具之间用一条淡线隔开，卡片各占一块，扫一眼就能分开
+			b.WriteString("  " + styleRule.Render(strings.Repeat("─", w)))
+			b.WriteString("\n")
+		}
 	}
 	b.WriteString("\n")
-	b.WriteString(styles.Hints("↑↓", "选择", "enter", "启动/安装", "u", "升级", "U", "一键全部更新", "s", "装 skill", "r", "重新检查", "q", "退出"))
+	b.WriteString(m.viewHints("↑↓", "选择", "enter", "启动/安装", "u", "升级", "U", "全部更新", "s", "装 skill", "r", "重新检查", "q", "退出"))
 	return b.String()
+}
+
+// viewHints 和 theme.Hints 一样，但窄终端会自动折成两行，不会把最后一个键提示切掉
+func (m tuiModel) viewHints(pairs ...string) string {
+	const indent, sepW = 2, 5 // "  ·  "
+	w := m.contentWidth()
+	var lines, line []string
+	lineW := indent
+	for i := 0; i+1 < len(pairs); i += 2 {
+		part := styles.Key.Render(pairs[i]) + styles.Dim.Render(" "+pairs[i+1])
+		pw := lipgloss.Width(pairs[i]) + 1 + lipgloss.Width(pairs[i+1])
+		if len(line) > 0 && lineW+sepW+pw > w {
+			lines = append(lines, "  "+strings.Join(line, styles.Dim.Render("  ·  ")))
+			line, lineW = nil, indent
+		}
+		if len(line) > 0 {
+			lineW += sepW
+		}
+		line = append(line, part)
+		lineW += pw
+	}
+	if len(line) > 0 {
+		lines = append(lines, "  "+strings.Join(line, styles.Dim.Render("  ·  ")))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m tuiModel) viewSwitches() string {
@@ -728,68 +777,138 @@ func (m tuiModel) viewSwitches() string {
 		"    " + styles.Key.Render("A") + styles.Dim.Render(" 自动安装最新版 ") + state(m.cfg.AutoInstall)
 }
 
-func (m tuiModel) renderCard(st toolState, selected bool) string {
-	w := m.contentWidth()
-	status, style := m.cardStatus(st)
-	name := st.Tool.Key
-	if st.Tool.Custom {
-		name += styles.Dim.Render(" · 自定义")
+// cardCols 是所有卡片共用的列宽：名称列和版本列左对齐，后面的路径才好排
+type cardCols struct {
+	name int
+	ver  int
+}
+
+func (m tuiModel) cardCols() cardCols {
+	c := cardCols{name: 6, ver: 8}
+	for _, st := range m.states {
+		if n := lipgloss.Width(st.Tool.Key); n > c.name {
+			c.name = n
+		}
+		if n := lipgloss.Width(m.versionCell(st)); n > c.ver {
+			c.ver = n
+		}
 	}
-	ver := versionText(st)
+	if c.name > 20 {
+		c.name = 20
+	}
+	if c.ver > 24 {
+		c.ver = 24
+	}
+	return c
+}
+
+// statusIcon 用一个符号说清状态，颜色再补一层；
+// 不再写「已是最新」这类和版本号重复的话，版本号本身就能说明问题
+func (m tuiModel) statusIcon(st toolState) (string, lipgloss.Style) {
+	switch {
+	case st.Installed == "" && st.CheckErr != "":
+		return "!", styles.Bad // 这台机器上装不了
+	case st.Installed == "":
+		return "○", styles.Warn
+	case st.CheckErr != "":
+		return "!", styles.Warn // 版本有了，最新版没查到
+	case st.Latest != "" && m.staged[st.Tool.Key] == st.Latest:
+		return "↓", styles.Good // 已下载，按 u 就能装
+	case st.Behind():
+		return "↑", styles.Warn
+	default:
+		return "✓", styles.Good
+	}
+}
+
+// versionCell 是版本那一格：状态图标 + 版本号（可更新时是 旧 → 新）
+func (m tuiModel) versionCell(st toolState) string {
 	if !m.localReady {
-		ver = "读取中…"
+		return styles.Dim.Render(m.spin.View()) + " " + styleVerOld.Render("读取中…")
 	}
-	head := styles.Text.Render(name) + "   " + styles.Text.Render(ver) + "   " + style.Render(status)
+	icon, iconStyle := m.statusIcon(st)
+	verStyle := styleVer
+	if m.pending[st.Tool.Key] {
+		// 最新版还没回来，先转圈；已装版本照常显示
+		icon, iconStyle, verStyle = m.spin.View(), styles.Dim, styleVerOld
+	}
+	switch {
+	case st.Installed == "":
+		return iconStyle.Render(icon) + " " + styleVerOld.Render("未安装")
+	case st.Latest == "":
+		return iconStyle.Render(icon) + " " + verStyle.Render(st.Installed)
+	case isNewer(st.Latest, st.Installed):
+		return iconStyle.Render(icon) + " " + styleVerOld.Render(st.Installed) +
+			styleVerOld.Render(" → ") + styleVerNew.Render(st.Latest)
+	default:
+		return iconStyle.Render(icon) + " " + verStyle.Render(st.Installed)
+	}
+}
 
-	line2 := styles.Dim.Render(theme.Truncate(st.Tool.Desc, w))
+// renderCard 一行主信息（名称 · 版本 · 路径），一行说明；
+// 路径贴右边，版本那几列不会因为路径长短而跑位
+func (m tuiModel) renderCard(st toolState, selected bool, cols cardCols) string {
+	w := m.contentWidth()
+	nameStyle := styleNameOff
+	if selected {
+		nameStyle = styleNameOn
+	}
 
-	var line3 string
+	head := nameStyle.Render(theme.Pad(st.Tool.Key, cols.name)) + "  " +
+		theme.Pad(m.versionCell(st), cols.ver)
+
+	desc := st.Tool.Desc
+	if st.Tool.Custom {
+		desc = "自定义 · " + desc
+	}
+	tail, tailStyle, tailShort := "", styles.Dim, ""
 	switch {
 	case !m.localReady:
-		line3 = styles.Dim.Render("正在读取本地安装位置…")
-	case m.staged[st.Tool.Key] != "" && m.staged[st.Tool.Key] == st.Latest:
-		line3 = styles.Good.Render("已下载 " + st.Latest + "，按 u 安装")
-	case st.Path != "":
-		line3 = styles.Dim.Render(theme.Truncate(shortenHome(st.Path), w))
+		desc, tail = "正在读取本地安装位置…", ""
+	case st.Installed == "" && st.CheckErr != "":
+		tail, tailStyle = "  "+st.CheckErr, styles.Warn
+	case st.Installed == "":
+		tail, tailStyle = "  ·  按 enter 安装到 "+shortenHome(m.installHint()), styles.Dim
+		tailShort = "  ·  按 enter 安装"
 	case st.CheckErr != "":
-		line3 = styles.Warn.Render(theme.Truncate(st.CheckErr, w))
-	default:
-		line3 = styles.Dim.Render("按 enter 安装到 " + shortenHome(m.installHint()))
+		tail, tailStyle = "  ·  "+st.CheckErr, styles.Warn
+	case st.Latest != "" && m.staged[st.Tool.Key] == st.Latest:
+		tail, tailStyle = "  ·  已下载，按 u 安装", styles.Good
 	}
 
-	body := head + "\n" + line2 + "\n" + line3
+	// 第二行：作用在左，路径贴右边。窄屏时依次舍弃：路径 → 提示 → 截短提示
+	const indent = "   "
+	room := func(tail, p string) int {
+		return w - lipgloss.Width(indent) - lipgloss.Width(tail) - lipgloss.Width(p) - 2
+	}
+	p := ""
+	if st.Path != "" {
+		p = shortenHome(st.Path)
+	}
+	if p != "" && room(tail, p) < 16 {
+		p = ""
+	}
+	if tail != "" && tailShort != "" && room(tail, p) < 24 {
+		tail = tailShort // 窄屏上先把提示说短，别把说明挤没
+	}
+	if tail != "" && room(tail, p) < 16 {
+		tail = ""
+	}
+	descRoom := max(room(tail, p), 8)
+	line2 := indent + stylePath.Render(theme.Truncate(desc, descRoom))
+	if tail != "" {
+		line2 += tailStyle.Render(tail)
+	}
+	if p != "" {
+		line2 += strings.Repeat(" ", max(w-lipgloss.Width(line2)-lipgloss.Width(p), 2)) +
+			stylePath.Render(p)
+	}
+
+	body := head + "\n" + line2
 	if selected {
-		return styles.CardOn.Render(body)
+		return styleCardOn.Render(body)
 	}
 	return styles.CardOff.Render(body)
-}
-
-// cardStatus 本地没扫完或最新版还在路上时，先用转圈代替状态
-func (m tuiModel) cardStatus(st toolState) (string, lipgloss.Style) {
-	switch {
-	case !m.localReady:
-		return m.spin.View() + " 读取中", styles.Dim
-	case m.pending[st.Tool.Key]:
-		return m.spin.View() + " 查询最新版…", styles.Dim
-	default:
-		return statusStyle(st)
-	}
-}
-
-// versionText 把已装和最新都摆在卡片上：0.4.2 → 0.4.3 / 0.4.2 · 最新 0.4.2
-func versionText(st toolState) string {
-	switch {
-	case st.Installed == "" && st.Latest != "":
-		return "未安装 · 最新 " + st.Latest
-	case st.Installed == "":
-		return "未安装"
-	case st.Latest == "":
-		return "已装 " + st.Installed
-	case isNewer(st.Latest, st.Installed):
-		return st.Installed + " → " + st.Latest
-	default:
-		return st.Installed + " · 最新 " + st.Latest
-	}
 }
 
 func (m tuiModel) installHint() string {
@@ -839,20 +958,6 @@ func (m tuiModel) contentWidth() int {
 		w = 110
 	}
 	return w
-}
-
-func statusStyle(st toolState) (string, lipgloss.Style) {
-	label, kind := st.Status()
-	switch kind {
-	case "ok":
-		return "✓ 已是最新", styles.Good
-	case "behind":
-		return "↑ 可更新", styles.Warn
-	case "missing":
-		return "按 enter 安装", styles.Warn
-	default:
-		return "! " + label, styles.Warn
-	}
 }
 
 func runTUI() int {

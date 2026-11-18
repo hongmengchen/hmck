@@ -13,7 +13,7 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.5.1"
+var version = "0.6.0"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
