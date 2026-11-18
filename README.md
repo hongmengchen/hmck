@@ -1,5 +1,8 @@
 # hmck
 
+<p align="center"><img src="docs/logo.svg" width="96" height="96" alt="hmck 标志"></p>
+<p align="center">方框是装好的程序，箭头是升到新版本。</p>
+
 [![CI](https://github.com/hongmengchen/hmck/actions/workflows/ci.yml/badge.svg)](https://github.com/hongmengchen/hmck/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/hongmengchen/hmck)](https://github.com/hongmengchen/hmck/releases)
 [![License](https://img.shields.io/github/license/hongmengchen/hmck)](LICENSE)
@@ -18,23 +21,23 @@
 
 ```
 $ hmck
-hmck  我的命令行小工具
-  3 个工具 · 1 个可更新 · 检查于 15:42:07
-  a 自动下载最新版 [关]    A 自动安装最新版 [关]
+╭───╮  hmck  我的命令行小工具
+│ ↑ │  3 个工具 · 1 个可更新 · 检查于 15:42:07
+╰───╯  a 自动下载最新版 [关]    A 自动安装最新版 [关]
 
 │ kube-token  ✓ 0.6.2                                        12 天前更新
-│    粘贴新 token 替换 kubeconfig 里的旧值                        ~/.local/bin/kube-token
+│    粘贴新 token 替换 kubeconfig 里的旧值                    ~/.local/bin/kube-token
   ──────────────────────────────────────────────────────────────────────────
 │ npm-token   ✓ 0.4.1                                         3 小时前更新
-│    检查并更新 ~/.npmrc 里的 registry token                      ~/.local/bin/npm-token
+│    检查并更新 ~/.npmrc 里的 registry token                  ~/.local/bin/npm-token
   ──────────────────────────────────────────────────────────────────────────
-│ hmck        ↑ 0.5.1 → 0.6.0                                    刚刚更新
+│ hmck        ↑ 0.7.1 → 0.8.0                                    刚刚更新
 │    管理这些命令行小工具，包括它自己                             ~/.local/bin/hmck
 
   ↑↓ 选择  ·  enter 启动/安装  ·  u 升级  ·  U 全部更新  ·  s 装 skill  ·  r 重新检查  ·  q 退出
 ```
 
-打开后先列出本地工具（版本、安装位置），最新版在后台查询；查到哪个就刷新哪张卡片，查询期间那一格显示转圈，不用对着一个空白的加载页等网络。每个工具占一块，中间用淡线隔开：第一行是名称和版本，第二行左边是它干什么、右边是装在哪。
+打开后先列出本地工具（版本、安装位置），最新版在后台查询；查到哪个就刷新哪张卡片，查询期间那一格显示转圈，不用对着一个空白的加载页等网络。左上角的招牌和仓库里的 [`docs/logo.svg`](docs/logo.svg) 是同一套几何（方框 + 向上的箭头，也用纯文字画着，不依赖图片和字体）。每个工具占一块，中间用淡线隔开：第一行是名称和版本，第二行左边是它干什么、右边是装在哪。
 
 状态只用一个图标表示，不再和版本号重复写「最新」：
 

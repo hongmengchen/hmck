@@ -446,6 +446,28 @@ func TestAnyKeyLeavesResult(t *testing.T) {
 	}
 }
 
+// 列表页左边有招牌，和 docs/logo.svg 是同一套方框 + 向上箭头
+func TestListViewShowsLogo(t *testing.T) {
+	m := newTUIModel()
+	m.width, m.height = 100, 40
+	m.localReady = true
+	m.pending = map[string]bool{}
+	m.states = []toolState{{
+		Tool: tool{Key: "tool-a", Desc: "示例工具"}, Path: "/tmp/tool-a",
+		Installed: "0.1.0", Latest: "0.1.0",
+	}}
+
+	got := plainText(m.viewList())
+	for _, want := range []string{"╭───╮", "│ ↑ │", "╰───╯"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("列表页缺招牌 %q:\n%s", want, got)
+		}
+	}
+	if first := strings.SplitN(got, "\n", 2)[0]; !strings.Contains(first, "╭───╮") || !strings.Contains(first, "hmck") {
+		t.Errorf("第一行应是招牌 + 标题，got %q", first)
+	}
+}
+
 func TestLatestResultsArriveOneByOne(t *testing.T) {
 	m := newTUIModel()
 	m.state = list

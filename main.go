@@ -14,7 +14,7 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.7.1"
+var version = "0.8.0"
 
 func main() { os.Exit(run(os.Args[1:])) }
 

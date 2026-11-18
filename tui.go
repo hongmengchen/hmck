@@ -690,12 +690,30 @@ func (m tuiModel) View() string {
 	return "\n" + body + "\n"
 }
 
+// logoLines 是终端里的招牌，和 docs/logo.svg 同一套几何：一个方框加向上的箭头
+var logoLines = []string{
+	"╭───╮",
+	"│ ↑ │",
+	"╰───╯",
+}
+
+// withLogo 把 logo 摆在左边，右边逐行接上文字
+func (m tuiModel) withLogo(lines ...string) string {
+	var b strings.Builder
+	for i, l := range logoLines {
+		b.WriteString(styles.Accent.Render(l))
+		if i < len(lines) && lines[i] != "" {
+			b.WriteString("  " + lines[i])
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 func (m tuiModel) viewList() string {
 	var b strings.Builder
 	w := m.contentWidth()
 	cols := m.cardCols()
-	b.WriteString(styles.Title.Render("hmck") + styles.Dim.Render("  我的命令行小工具"))
-	b.WriteString("\n")
 
 	behind, missing := 0, 0
 	for _, st := range m.states {
@@ -706,7 +724,7 @@ func (m tuiModel) viewList() string {
 			missing++
 		}
 	}
-	summary := fmt.Sprintf("  %d 个工具", len(m.states))
+	summary := fmt.Sprintf("%d 个工具", len(m.states))
 	if behind == 0 && missing == 0 && !m.checkedAt.IsZero() {
 		summary += " · 全部已是最新"
 	} else {
@@ -720,14 +738,15 @@ func (m tuiModel) viewList() string {
 	if !m.checkedAt.IsZero() {
 		summary += " · 检查于 " + m.checkedAt.Format("15:04:05")
 	}
-	b.WriteString(styles.Dim.Render(summary))
-	b.WriteString("\n")
+	b.WriteString(m.withLogo(
+		styles.Title.Render("hmck")+styles.Dim.Render("  我的命令行小工具"),
+		styles.Dim.Render(summary),
+		m.viewSwitches(),
+	))
 	if m.configErr != "" {
 		b.WriteString(styles.Warn.Render("  自定义工具配置有问题: " + theme.Truncate(m.configErr, w)))
 		b.WriteString("\n")
 	}
-	b.WriteString(m.viewSwitches())
-	b.WriteString("\n")
 	if m.cfgErr != "" {
 		b.WriteString(styles.Warn.Render("  开关没保存: " + theme.Truncate(m.cfgErr, w)))
 		b.WriteString("\n")
@@ -780,7 +799,7 @@ func (m tuiModel) viewSwitches() string {
 		}
 		return styles.Dim.Render("[关]")
 	}
-	return "  " + styles.Key.Render("a") + styles.Dim.Render(" 自动下载最新版 ") + state(m.cfg.AutoDownload) +
+	return styles.Key.Render("a") + styles.Dim.Render(" 自动下载最新版 ") + state(m.cfg.AutoDownload) +
 		"    " + styles.Key.Render("A") + styles.Dim.Render(" 自动安装最新版 ") + state(m.cfg.AutoInstall)
 }
 

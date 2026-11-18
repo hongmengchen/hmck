@@ -2,6 +2,13 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.8.0] - 2026-11-18
+
+### 新增
+
+- hmck 有了自己的标志：`docs/logo.svg`（方框 + 向上的箭头）
+- TUI 左上角用纯文字画出同一套几何，不依赖图片、字体和终端图形支持；标题、统计和两个开关排在它右边
+
 ## [0.7.1] - 2026-11-18
 
 ### 修复
