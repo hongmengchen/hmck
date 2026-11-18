@@ -530,7 +530,13 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case result:
-		return m.refresh()
+		// 结果页的版本状态在结果消息里已经更新过，回列表直接切屏即可；
+		// 再重扫一遍会把刚升级的 hmck 自己读回运行中的旧版本，也会让页面一直停在结果页
+		if k.String() == "q" || k.String() == "esc" {
+			return m, tea.Quit
+		}
+		m.state = list
+		return m, nil
 	}
 	return m, nil
 }

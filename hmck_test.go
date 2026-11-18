@@ -419,6 +419,33 @@ func TestKeysBlockedBeforeLocalScan(t *testing.T) {
 	}
 }
 
+// 结果页按任意键要回得到列表（之前会一直停在结果页），q / esc 直接退出
+func TestAnyKeyLeavesResult(t *testing.T) {
+	m := newTUIModel()
+	m.state = result
+	m.resultLines = []resultLine{{text: "hmck 0.6.0 → 0.7.0 已更新", ok: true}}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	got := updated.(tuiModel)
+	if got.state != list {
+		t.Fatalf("按 x 之后还在 state=%v", got.state)
+	}
+	if cmd != nil {
+		t.Errorf("回列表不需要重扫，cmd 应为 nil")
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if updated.(tuiModel).state != result {
+		t.Error("q 应当直接退出")
+	}
+	if cmd == nil {
+		t.Fatal("q 没有返回退出命令")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("q 返回的不是 tea.Quit")
+	}
+}
+
 func TestLatestResultsArriveOneByOne(t *testing.T) {
 	m := newTUIModel()
 	m.state = list
