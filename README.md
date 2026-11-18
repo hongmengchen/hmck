@@ -45,6 +45,9 @@ Windows（PowerShell）：
 irm https://raw.githubusercontent.com/hongmengchen/hmck/main/install.ps1 | iex
 ```
 
+Windows 的 Git Bash / MSYS 里也能直接用上面的 `install.sh`（会装成 `hmck.exe`）；
+想在 PowerShell / CMD 里也能用，优先选 `install.ps1`。
+
 有 Go 环境可以直接 `go install github.com/hongmengchen/hmck@latest`。
 
 安装完会自动跑一次 `hmck skill`，把 agent 用法说明写到 `~/.claude/skills/`。

@@ -12,7 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-var version = "0.3.0"
+var version = "0.3.1"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
