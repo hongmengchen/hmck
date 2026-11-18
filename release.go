@@ -150,24 +150,87 @@ func fetchReleaseInfo(repo string) (releaseInfo, error) {
 	return info, nil
 }
 
-// installTool 下载并替换成最新版；返回装好的版本号
-func installTool(st toolState) (string, error) {
+// userCacheDir 存“自动下载”下来的新版二进制；测试里替换
+var userCacheDir = os.UserCacheDir
+
+// downloadCacheDir 是预下载目录：先下好、校验好，安装时只做本地替换
+func downloadCacheDir() (string, error) {
+	root, err := userCacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, "hmck", "downloads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func cachedBinary(t tool, ver string) (string, error) {
+	dir, err := downloadCacheDir()
+	if err != nil {
+		return "", err
+	}
+	name := fmt.Sprintf("%s_%s_%s_%s", t.Key, ver, runtime.GOOS, runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(dir, name), nil
+}
+
+// fetchTool 下载并校验到一个版本对应的缓存文件；已经下过就直接复用。
+// 返回缓存路径和版本号。
+func fetchTool(st toolState) (string, string, error) {
 	t := st.Tool
 	if !supports(t, runtime.GOOS, runtime.GOARCH) {
-		return "", fmt.Errorf("%s 没有 %s/%s 的发布", t.Key, runtime.GOOS, runtime.GOARCH)
+		return "", "", fmt.Errorf("%s 没有 %s/%s 的发布", t.Key, runtime.GOOS, runtime.GOARCH)
 	}
 
 	tag := st.Latest
 	if tag == "" {
 		var err error
 		if tag, err = latestTag(t.Repo); err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 	if !strings.HasPrefix(tag, "v") {
 		tag = "v" + tag
 	}
+	ver := strings.TrimPrefix(tag, "v")
 
+	cached, err := cachedBinary(t, ver)
+	if err != nil {
+		return "", "", err
+	}
+	if fi, err := os.Stat(cached); err == nil && fi.Size() >= 100_000 {
+		return cached, ver, nil
+	}
+
+	dir, err := downloadCacheDir()
+	if err != nil {
+		return "", "", err
+	}
+	asset := assetName(t, runtime.GOOS, runtime.GOARCH)
+	tmp, err := downloadAsset(releaseAssetURL(t.Repo, tag, asset), dir)
+	if err != nil {
+		return "", "", err
+	}
+	if t.Checksums {
+		if err := verifyChecksum(t.Repo, tag, asset, tmp); err != nil {
+			os.Remove(tmp)
+			return "", "", err
+		}
+	}
+	if err := os.Rename(tmp, cached); err != nil {
+		os.Remove(tmp)
+		return "", "", err
+	}
+	return cached, ver, nil
+}
+
+// installTool 下载并替换成最新版；返回装好的版本号
+func installTool(st toolState) (string, error) {
+	t := st.Tool
 	target := st.Path
 	if target == "" {
 		dir, err := installDir()
@@ -181,16 +244,13 @@ func installTool(st toolState) (string, error) {
 		return "", fmt.Errorf("%s 不可写（程序在运行？或用 sudo 重试）", dir)
 	}
 
-	asset := assetName(t, runtime.GOOS, runtime.GOARCH)
-	tmp, err := downloadAsset(releaseAssetURL(t.Repo, tag, asset), dir)
+	cached, ver, err := fetchTool(st)
 	if err != nil {
 		return "", err
 	}
-	if t.Checksums {
-		if err := verifyChecksum(t.Repo, tag, asset, tmp); err != nil {
-			os.Remove(tmp)
-			return "", err
-		}
+	tmp, err := copyToTemp(cached, dir)
+	if err != nil {
+		return "", err
 	}
 	if err := installBinary(tmp, target); err != nil {
 		os.Remove(tmp)
@@ -198,7 +258,31 @@ func installTool(st toolState) (string, error) {
 	}
 
 	runPostInstall(t, target)
-	return strings.TrimPrefix(tag, "v"), nil
+	return ver, nil
+}
+
+// copyToTemp 把缓存里的二进制复制到目标目录，再交给 installBinary 原子替换
+func copyToTemp(src, dir string) (string, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	out, err := os.CreateTemp(dir, ".hmck-inst-*")
+	if err != nil {
+		return "", err
+	}
+	name := out.Name()
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(name)
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(name)
+		return "", err
+	}
+	return name, nil
 }
 
 func downloadAsset(assetURL, dir string) (string, error) {

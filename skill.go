@@ -77,8 +77,8 @@ func refreshToolSkills(skip bool) (done, failed []string) {
 		failed = append(failed, "读取自定义工具配置")
 	}
 	for _, t := range tools {
-		if !t.Skill {
-			continue
+		if !t.Skill || t.Self {
+			continue // hmck 自己的 skill 由 runSkill 直接写，避免递归
 		}
 		path, ok := findTool(t)
 		if !ok {

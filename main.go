@@ -10,9 +10,10 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.3.2"
+var version = "0.4.0"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -64,7 +65,7 @@ func usage(w io.Writer) {
   hmck list [--json]       列出工具、已装版本、最新版本
   hmck run <tool> [参数…]  启动工具，参数原样传给它
   hmck install <tool>      安装最新版（--force 重装）
-  hmck upgrade [<tool>]    升级；不带参数就升级所有可升级的工具
+  hmck upgrade [<tool>]    升级；不带参数就升级所有可升级的工具（包括 hmck 自己）
   hmck add <owner/repo>    把一个新工具加进本机配置，之后就能 install/upgrade
   hmck rm <tool>           删掉自定义工具（内置的删不了）
   hmck skill               给 hmck 和已安装的工具装 agent skill
@@ -83,9 +84,10 @@ func usage(w io.Writer) {
 	}
 	fmt.Fprintf(w, `
 例:
-  hmck                    # 选 kube-token / npm-token，回车直接进它的 TUI
+  hmck                    # 选工具，回车直接进它的 TUI（hmck 自己按 enter 是升级）
   hmck run npm-token      # 命令行直接启动
-  hmck upgrade            # 把所有工具升到最新
+  hmck upgrade            # 把 hmck 和所有工具升到最新
+  hmck upgrade hmck       # 只升级 hmck 自己
 `)
 }
 
@@ -153,12 +155,12 @@ func runList(args []string) int {
 		w3 = max(w3, lipgloss.Width(r.latest))
 	}
 	fmt.Printf("%s  %s  %s  %s\n",
-		dim(pad("NAME", w1), color), dim(pad("已安装", w2), color),
-		dim(pad("最新", w3), color), dim("状态", color))
+		dim(theme.Pad("NAME", w1), color), dim(theme.Pad("已安装", w2), color),
+		dim(theme.Pad("最新", w3), color), dim("状态", color))
 	for i, r := range rows {
 		_, kind := states[i].Status()
 		fmt.Printf("%s  %s  %s  %s\n",
-			pad(r.name, w1), pad(r.installed, w2), pad(r.latest, w3),
+			theme.Pad(r.name, w1), theme.Pad(r.installed, w2), theme.Pad(r.latest, w3),
 			paint(r.status, kind, color))
 	}
 
@@ -200,6 +202,10 @@ func inspectAll() ([]toolState, error) {
 func runRun(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "要启动哪个工具？例如: hmck run npm-token")
+		return 2
+	}
+	if strings.EqualFold(strings.TrimSpace(args[0]), "hmck") {
+		fmt.Fprintln(os.Stderr, "hmck 就是它自己，直接运行 hmck 就行")
 		return 2
 	}
 	t, ok := toolByKey(args[0])
@@ -488,13 +494,6 @@ func reorderArgs(args []string, valueFlags map[string]bool) []string {
 		rest = append(rest, a)
 	}
 	return append(flags, rest...)
-}
-
-func pad(s string, w int) string {
-	if n := lipgloss.Width(s); n < w {
-		return s + strings.Repeat(" ", w-n)
-	}
-	return s
 }
 
 func paint(s, kind string, color bool) string {

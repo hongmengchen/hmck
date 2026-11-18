@@ -25,6 +25,7 @@ type tool struct {
 	PostInstall []string `json:"post_install,omitempty"` // 装完/升级后要跑的子命令（忽略失败）
 
 	Custom bool `json:"-"` // 来自本机配置，不是内置
+	Self   bool `json:"-"` // hmck 自己：路径取当前可执行文件，版本用内置的
 }
 
 var registry = []tool{
@@ -56,6 +57,22 @@ var registry = []tool{
 		Checksums:   true,
 		Skill:       true,
 		PostInstall: []string{"skill", "--quiet"},
+	},
+	{
+		// hmck 自己也在 GitHub 发版，升级时和别的工具走同一套下载/校验/替换
+		Key:    "hmck",
+		Name:   "hmck",
+		Desc:   "管理这些命令行小工具，包括它自己",
+		Repo:   "hongmengchen/hmck",
+		Binary: "hmck",
+		Platforms: []string{
+			"darwin/amd64", "darwin/arm64",
+			"linux/amd64", "linux/arm64",
+			"windows/amd64", "windows/arm64",
+		},
+		Checksums:   true,
+		PostInstall: []string{"skill", "--quiet"},
+		Self:        true,
 	},
 }
 
@@ -216,7 +233,16 @@ func (s toolState) Status() (string, string) {
 // inspect 查一个工具的本地版本和远端最新版
 func inspect(t tool) toolState {
 	st := toolState{Tool: t}
-	if p, ok := findTool(t); ok {
+	if t.Self {
+		// 正在运行的这一份才是“已安装”的版本；不要去 PATH 里找旧副本
+		if exe, err := os.Executable(); err == nil {
+			if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+				exe = resolved
+			}
+			st.Path = exe
+		}
+		st.Installed = version
+	} else if p, ok := findTool(t); ok {
 		st.Path = p
 		st.Installed = installedVersion(p)
 	}

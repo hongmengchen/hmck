@@ -8,28 +8,43 @@
 | --- | --- |
 | [kube-token](https://github.com/hongmengchen/kube-token) | 粘贴新 token 替换 kubeconfig 里的旧值 |
 | [npm-token](https://github.com/hongmengchen/npm-token) | 检查并更新 `~/.npmrc` 里的 registry token |
+| [hmck](https://github.com/hongmengchen/hmck) | 它自己——`hmck upgrade` 会把自己也升到最新 |
 
 以后新增的工具不用改代码：`hmck add owner/repo` 存进本机配置，立刻就能装、能升级。
 
 ```
 $ hmck
 hmck  我的命令行小工具
-  2 个工具 · 1 个可更新 · 检查于 15:42:07
+  3 个工具 · 1 个可更新 · 检查于 15:42:07
+  a 自动下载最新版 [关]    A 自动安装最新版 [关]
 
-│ kube-token   0.4.2 · 最新 0.4.2      ✓ 已是最新
+│ kube-token   0.5.0 · 最新 0.5.0      ✓ 已是最新
 │ 粘贴新 token 替换 kubeconfig 里的旧值
 │ ~/.local/bin/kube-token
 │
-│ npm-token   0.1.0 → 0.1.1            ↑ 可更新
+│ npm-token   0.3.0 → 0.3.1            ↑ 可更新
 │ 检查并更新 ~/.npmrc 里的 registry token
 │ ~/.local/bin/npm-token
+│
+│ hmck   0.4.0 · 最新 0.4.0           ✓ 已是最新
+│ 管理这些命令行小工具，包括它自己
+│ ~/.local/bin/hmck
 
   ↑↓ 选择  ·  enter 启动/安装  ·  u 升级  ·  U 一键全部更新  ·  s 装 skill  ·  r 重新检查  ·  q 退出
 ```
 
 每个工具都同时显示已装版本和 GitHub 上的最新版本，能升的直接标 `0.1.0 → 0.1.1`。
 
-`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；`u` 升级选中的工具；`U` 把所有可更新的工具按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
+`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
+
+两个开关用 `a` / `A` 切换，立即生效并写进配置：
+
+| 开关 | 键 | 行为 |
+| --- | --- | --- |
+| 自动下载最新版 | `a` | 检查完把新版下载并校验到缓存，卡片显示「已下载，按 u 安装」 |
+| 自动安装最新版 | `A` | 检查完直接下载并替换；隐含自动下载，关掉自动下载会一起关 |
+
+自动行为只在 TUI 里跑，`hmck list --json` 这类脚本用法不会偷偷改系统。开关存在和 `tools.json` 同目录的 `config.json`。
 
 ## 安装
 
@@ -59,7 +74,8 @@ hmck                      # 打开管理界面
 hmck list                 # 纯文本表格；--json 给脚本用
 hmck run npm-token        # 直接启动，后面的参数原样传过去
 hmck install npm-token    # 安装最新版
-hmck upgrade              # 升级所有可升级的工具
+hmck upgrade              # 升级所有可升级的工具（包括 hmck 自己）
+hmck upgrade hmck         # 只升级 hmck 自己
 hmck upgrade npm-token    # 只升一个
 hmck upgrade --force      # 已是最新也重装一遍
 hmck skill                # 给 hmck 和已安装的工具装 agent skill
@@ -69,7 +85,12 @@ hmck skill                # 给 hmck 和已安装的工具装 agent skill
 
 安装位置：工具已经在 PATH 里就原地升级；没装就装到 hmck 旁边（通常 `~/.local/bin`）。
 
-升级安全：下载到同目录临时文件，有 `checksums.txt` 就校验 SHA-256，再原子 rename 覆盖；校验或下载失败不会动原文件。
+升级安全：先下载到缓存目录（`~/Library/Caches/hmck/downloads` 或 `~/.cache/hmck/downloads`），
+有 `checksums.txt` 就校验 SHA-256，再复制到目标目录、原子 rename 覆盖；校验或下载失败不会动原文件。
+同一个版本下载过一次，之后安装直接复用缓存。
+
+hmck 自己也在托管列表里：已装版本是编译进二进制的版本号，升级路径就是当前正在运行的可执行文件；
+替换后旧进程仍是旧版本，退出重开（或 `hmck version`）即可确认。
 
 ## 新增一个工具
 
@@ -87,9 +108,9 @@ hmck rm my-tool                 # 只删配置，不删已装的二进制
 
 | 系统 | 路径 |
 | --- | --- |
-| macOS | `~/Library/Application Support/hmck/tools.json` |
-| Linux | `~/.config/hmck/tools.json` |
-| Windows | `%AppData%\hmck\tools.json` |
+| macOS | `~/Library/Application Support/hmck/tools.json`、`config.json` |
+| Linux | `~/.config/hmck/tools.json`、`config.json` |
+| Windows | `%AppData%\hmck\tools.json`、`config.json` |
 
 `hmck add` 会去读最新 release，从资产名里推断支持的平台；读不到（没发版、网络不通、API 限流）
 就先按六个常见平台记录，装的时候真实平台不支持会明确报错。内置工具的 key 不能被覆盖。

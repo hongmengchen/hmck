@@ -65,6 +65,44 @@ func TestAssetNamesAndSupport(t *testing.T) {
 	}
 }
 
+func TestSelfIsManaged(t *testing.T) {
+	tl, ok := toolByKey("hmck")
+	if !ok || !tl.Self {
+		t.Fatalf("hmck 应当作为自己出现在工具列表里: %+v, %v", tl, ok)
+	}
+	if code := run([]string{"run", "hmck"}); code != 2 {
+		t.Errorf("hmck run hmck 应当拒绝，返回 %d", code)
+	}
+}
+
+func TestFetchToolReusesCache(t *testing.T) {
+	payload := bytes.Repeat([]byte("BINARY"), 40_000)
+	srv := fakeReleaseServer(t, payload, "")
+	defer srv.Close()
+
+	old := releaseAssetURL
+	releaseAssetURL = func(repo, tag, asset string) string { return srv.URL + "/download/" + tag + "/" + asset }
+	defer func() { releaseAssetURL = old }()
+
+	tl := tool{Key: "cachefake", Repo: "o/r", Binary: "cachefake",
+		Platforms: []string{runtime.GOOS + "/" + runtime.GOARCH}}
+	st := toolState{Tool: tl, Latest: "1.2.3"}
+	p1, v1, err := fetchTool(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, v2, err := fetchTool(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1 != p2 || v1 != "1.2.3" || v2 != v1 {
+		t.Errorf("第二次应当复用缓存: %q/%q vs %q/%q", p1, v1, p2, v2)
+	}
+	if got, _ := os.ReadFile(p2); !bytes.Equal(got, payload) {
+		t.Error("缓存内容不对")
+	}
+}
+
 func TestToolByKey(t *testing.T) {
 	for _, key := range []string{"npm-token", "npM-token", "npm"} {
 		if got, ok := toolByKey(key); !ok || got.Key != "npm-token" {
@@ -174,7 +212,8 @@ func TestInstallToolChecksumMismatch(t *testing.T) {
 	target := filepath.Join(dir, binaryName(tl, runtime.GOOS))
 	os.WriteFile(target, []byte("old"), 0o755)
 
-	if _, err := installTool(toolState{Tool: tl, Path: target, Latest: "9.9.9"}); err == nil {
+	// 用不同的版本号，避免复用到上一个用例下载好的缓存
+	if _, err := installTool(toolState{Tool: tl, Path: target, Latest: "9.9.8"}); err == nil {
 		t.Fatal("校验不匹配却成功了")
 	}
 	content, _ := os.ReadFile(target)
@@ -299,5 +338,25 @@ func TestVersionText(t *testing.T) {
 		if got := versionText(c.st); got != c.want {
 			t.Errorf("versionText(%+v) = %q, want %q", c.st, got, c.want)
 		}
+	}
+}
+
+func TestDownloadDoneStages(t *testing.T) {
+	m := newTUIModel()
+	m.state = working
+	m.updGen = 1
+	m.states = []toolState{
+		{Tool: tool{Key: "tool-a"}, Installed: "0.1.0", Latest: "0.2.0"},
+	}
+	updated, _ := m.Update(downloadDoneMsg{gen: 1, results: []downloadResult{{key: "tool-a", ver: "0.2.0"}}})
+	got := updated.(tuiModel)
+	if got.state != result {
+		t.Errorf("state = %v", got.state)
+	}
+	if got.staged["tool-a"] != "0.2.0" {
+		t.Errorf("staged = %+v", got.staged)
+	}
+	if len(got.resultLines) != 1 || !strings.Contains(got.resultLines[0].text, "已下载") {
+		t.Errorf("结果行 = %+v", got.resultLines)
 	}
 }

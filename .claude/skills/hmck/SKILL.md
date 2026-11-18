@@ -1,11 +1,11 @@
 ---
 name: hmck
-description: 管理这台机器上的一组命令行小工具（kube-token、npm-token 及以后新增的），看已装/最新版本、一键安装或升级、直接启动，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「看看有没有新版本」「装一下 kube-token / npm-token」「新增一个工具让 hmck 管理」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、自定义工具接入方式与安全约束。
+description: 管理这台机器上的一组命令行小工具（kube-token、npm-token 及以后新增的，也包括 hmck 自己），看已装/最新版本、一键安装或升级、直接启动，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token」「自动更新」「新增一个工具让 hmck 管理」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
 ---
 
 # hmck
 
-`hmck` 是这台机器上的工具管理器：内置 kube-token、npm-token，也能把以后的新工具加进来。
+`hmck` 是这台机器上的工具管理器：内置 kube-token、npm-token、以及它自己，也能把以后的新工具加进来。
 它知道每个工具的已安装版本、GitHub 最新版本、安装路径，能安装、升级、直接启动，
 还会顺手把各工具的 agent skill 刷新到全局目录。
 
@@ -52,10 +52,15 @@ hmck version
 ```bash
 hmck install npm-token          # 没装就装最新版
 hmck install npm-token --force  # 已是最新也重装
-hmck upgrade                    # 升级所有可升级的
+hmck upgrade                    # 升级所有可升级的，包括 hmck 自己
+hmck upgrade hmck               # 只升级 hmck 自己
 hmck upgrade npm-token          # 只升一个
 hmck run npm-token --help       # 直接启动工具，后面的参数原样传给工具
 ```
+
+`hmck` 自己也在 `registry` 里（`Self: true`）：已装版本用编译进二进制的版本号，
+目标路径是当前正在运行的可执行文件，和别的工具走同一套下载、checksum 校验、原子替换。
+`hmck run hmck` 会被拒绝——直接运行 `hmck` 即可。
 
 - 工具已经在 PATH 里就原地升级；没装就装到 hmck 旁边（通常 `~/.local/bin`）。
 - 升级：下载到同目录临时文件，有 `checksums.txt` 就校验 SHA-256，再原子 rename；
@@ -63,8 +68,18 @@ hmck run npm-token --help       # 直接启动工具，后面的参数原样传�
 - 装完/升级完会跑工具声明的 `post_install`（目前是 `skill --quiet`），agent 的说明跟着更新。
 - `hmck run` 会透传退出码，脚本里可以直接用。
 
-TUI（只有用户自己在终端里用）：`↑↓` 选择，`enter` 启动（没装则安装），`u` 升级选中的，
-`U` 一键升级所有可升级的，`s` 装/刷新 agent skill，`r` 重新检查，`q` 退出。
+TUI（只有用户自己在终端里用）：`↑↓` 选择，`enter` 启动（没装则安装；选到 hmck 自己是升级），
+`u` 升级选中的，`U` 一键升级所有可升级的，`s` 装/刷新 agent skill，`r` 重新检查，`q` 退出。
+
+列表上方有两个开关，按 `a` / `A` 切换并立即写进配置：
+
+| 开关 | 键 | 行为 |
+| --- | --- | --- |
+| 自动下载最新版 | `a` | 每次检查完，把可更新的版本下载并校验到缓存，卡片显示「已下载，按 u 安装」 |
+| 自动安装最新版 | `A` | 检查完直接下载并替换（隐含自动下载；关掉自动下载会一起关掉） |
+
+配置写在 `hmck/config.json`（和 `tools.json` 同目录）。自动行为只在 TUI 里生效，
+`hmck list --json` 等脚本用途不会偷偷改动系统。
 
 ## 3. 让 agent 读懂这些工具
 
@@ -92,9 +107,9 @@ hmck rm my-tool                      # 只删自定义工具
 
 | 系统 | 路径 |
 | --- | --- |
-| macOS | `~/Library/Application Support/hmck/tools.json` |
-| Linux | `~/.config/hmck/tools.json` |
-| Windows | `%AppData%\hmck\tools.json` |
+| macOS | `~/Library/Application Support/hmck/tools.json`、`config.json` |
+| Linux | `~/.config/hmck/tools.json`、`config.json` |
+| Windows | `%AppData%\hmck\tools.json`、`config.json` |
 
 加完立刻可以 `hmck install <key>` / `hmck upgrade` / `hmck list` / TUI 里管理。
 
@@ -130,5 +145,8 @@ hmck rm my-tool                      # 只删自定义工具
 | `校验失败` | 下载内容与 checksums.txt 不符，原文件未动；重试或检查代理 |
 | `没有 xx/yy 的发布` | 该工具没发这个平台，或 `hmck add` 推断的平台和实际资产名不一致 |
 | `自定义工具配置有问题` | `tools.json` 不是合法 JSON / 缺 repo；按提示修或删掉该条 |
+| `开关没保存` | `config.json` 所在目录不可写或文件不是合法 JSON；按提示修 |
+| 自动下载了但没装 | 这是「自动下载」；按 `u` / `U` 安装，或打开「自动安装」 |
+| hmck 升级后还是旧版本 | 正在运行的是旧进程；退出重开，或 `hmck version` 确认磁盘上的新版本 |
 | 装了却找不到命令 | 安装目录不在 PATH；hmck 仍能启动它，用户重开终端或把目录加进 PATH |
 | 工具没有 skill | 版本太旧（还没实现 `skill` 子命令）；先 `hmck upgrade <tool>` |
