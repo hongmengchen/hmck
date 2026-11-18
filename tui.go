@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -43,6 +44,11 @@ const (
 	result
 )
 
+type resultLine struct {
+	text string
+	ok   bool
+}
+
 type tuiModel struct {
 	states []toolState
 	cursor int
@@ -50,21 +56,41 @@ type tuiModel struct {
 
 	width, height int
 	spin          spinner.Model
+	checkedAt     time.Time
 
-	workText  string
-	resultMsg string
-	resultOK  bool
+	workText    string
+	resultLines []resultLine
+
+	// 一键更新的进度通道；updGen 防止上一次的残留消息串进来
+	updCh  chan tea.Msg
+	updGen int
 }
 
 type inspectDoneMsg struct{ states []toolState }
 
 type installDoneMsg struct {
-	key     string
-	version string
-	err     error
+	key, from, version string
+	err                error
 }
 
 type execDoneMsg struct{ err error }
+
+type installResult struct {
+	key, from, to string
+	err           error
+}
+
+type batchProgressMsg struct {
+	gen, index, total int
+	key               string
+}
+
+type batchDoneMsg struct {
+	gen     int
+	results []installResult
+}
+
+type batchClosedMsg struct{ gen int }
 
 func newTUIModel() tuiModel {
 	sp := spinner.New()
@@ -84,7 +110,34 @@ func inspectCmd() tea.Cmd {
 func installCmd(st toolState) tea.Cmd {
 	return func() tea.Msg {
 		v, err := installTool(st)
-		return installDoneMsg{key: st.Tool.Key, version: v, err: err}
+		return installDoneMsg{key: st.Tool.Key, from: st.Installed, version: v, err: err}
+	}
+}
+
+// upgradeAllCmd 依次升级所有可升级的工具，边跑边把进度发到通道里
+func upgradeAllCmd(targets []toolState, ch chan tea.Msg, gen int) tea.Cmd {
+	return func() tea.Msg {
+		defer close(ch)
+		results := make([]installResult, 0, len(targets))
+		for i, st := range targets {
+			select {
+			case ch <- batchProgressMsg{gen: gen, index: i + 1, total: len(targets), key: st.Tool.Key}:
+			default:
+			}
+			v, err := installTool(st)
+			results = append(results, installResult{key: st.Tool.Key, from: st.Installed, to: v, err: err})
+		}
+		return batchDoneMsg{gen: gen, results: results}
+	}
+}
+
+func waitUpd(ch chan tea.Msg, gen int) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return batchClosedMsg{gen: gen}
+		}
+		return msg
 	}
 }
 
@@ -116,41 +169,82 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case inspectDoneMsg:
 		m.states = msg.states
+		m.checkedAt = time.Now()
 		m.state = list
 		m.clampCursor()
 
 	case installDoneMsg:
 		m.state = result
-		if msg.err != nil {
-			m.resultOK = false
-			m.resultMsg = fmt.Sprintf("%s 升级失败: %v", msg.key, msg.err)
-		} else {
-			m.resultOK = true
-			m.resultMsg = fmt.Sprintf("%s 已升级到 %s", msg.key, msg.version)
+		m.resultLines = []resultLine{m.installResultLine(msg.key, msg.from, msg.version, msg.err)}
+		if msg.err == nil {
+			m.markUpdated(msg.key, msg.version)
 		}
-		// 本地版本立即刷新，不用再联网
-		for i := range m.states {
-			if m.states[i].Tool.Key != msg.key {
-				continue
-			}
-			if msg.version != "" {
-				m.states[i].Installed = msg.version
-				m.states[i].Latest = msg.version
-			}
-			if p, ok := findTool(m.states[i].Tool); ok {
-				m.states[i].Path = p
+
+	case batchProgressMsg:
+		if msg.gen != m.updGen || m.state != working {
+			return m, nil
+		}
+		m.workText = fmt.Sprintf("正在更新 %d/%d：%s…", msg.index, msg.total, msg.key)
+		// 继续等下一帧，否则后面的进度消息全堵在通道里
+		return m, waitUpd(m.updCh, msg.gen)
+
+	case batchClosedMsg:
+		return m, nil
+
+	case batchDoneMsg:
+		if msg.gen != m.updGen {
+			return m, nil
+		}
+		m.state = result
+		m.resultLines = nil
+		for _, r := range msg.results {
+			m.resultLines = append(m.resultLines, m.installResultLine(r.key, r.from, r.to, r.err))
+			if r.err == nil {
+				m.markUpdated(r.key, r.to)
 			}
 		}
 
 	case execDoneMsg:
-		m.state = list
 		if msg.err != nil {
-			m.resultOK = false
-			m.resultMsg = "工具退出时出错: " + msg.err.Error()
 			m.state = result
+			m.resultLines = []resultLine{{text: "工具退出时出错: " + msg.err.Error(), ok: false}}
+			return m, nil
 		}
+		m.state = list
 	}
 	return m, nil
+}
+
+func (m *tuiModel) installResultLine(key, from, to string, err error) resultLine {
+	if err != nil {
+		return resultLine{text: fmt.Sprintf("%s 升级失败: %v", key, err), ok: false}
+	}
+	switch {
+	case to == "":
+		return resultLine{text: key + " 已更新", ok: true}
+	case from == "":
+		return resultLine{text: fmt.Sprintf("%s 已安装 %s", key, to), ok: true}
+	case isNewer(to, from):
+		return resultLine{text: fmt.Sprintf("%s %s → %s 已更新", key, from, to), ok: true}
+	default:
+		return resultLine{text: fmt.Sprintf("%s %s 已是最新", key, to), ok: true}
+	}
+}
+
+func (m *tuiModel) markUpdated(key, newVer string) {
+	for i := range m.states {
+		if m.states[i].Tool.Key != key {
+			continue
+		}
+		if newVer != "" {
+			m.states[i].Installed = newVer
+			m.states[i].Latest = newVer
+			m.states[i].CheckErr = ""
+		}
+		if p, ok := findTool(m.states[i].Tool); ok {
+			m.states[i].Path = p
+		}
+	}
 }
 
 func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -181,6 +275,8 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(m.states) > 0 {
 				return m.startInstall(m.states[m.cursor])
 			}
+		case "U":
+			return m.startUpgradeAll()
 		case "r":
 			m.state = loading
 			return m, tea.Batch(m.spin.Tick, inspectCmd())
@@ -198,13 +294,34 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m tuiModel) startInstall(st toolState) (tea.Model, tea.Cmd) {
 	if st.Installed != "" && st.Latest != "" && !isNewer(st.Latest, st.Installed) {
 		m.state = result
-		m.resultOK = true
-		m.resultMsg = st.Tool.Key + " " + st.Installed + " 已是最新"
+		m.resultLines = []resultLine{{text: st.Tool.Key + " " + st.Installed + " 已是最新", ok: true}}
 		return m, nil
 	}
 	m.state = working
 	m.workText = "正在下载并替换 " + st.Tool.Key + "…"
 	return m, tea.Batch(m.spin.Tick, installCmd(st))
+}
+
+// startUpgradeAll 一键更新：把所有 Behind 的工具按顺序更新一遍
+func (m tuiModel) startUpgradeAll() (tea.Model, tea.Cmd) {
+	var targets []toolState
+	for _, st := range m.states {
+		if st.Behind() {
+			targets = append(targets, st)
+		}
+	}
+	if len(targets) == 0 {
+		m.state = result
+		m.resultLines = []resultLine{{text: "所有工具都已是最新", ok: true}}
+		return m, nil
+	}
+
+	m.state = working
+	m.updGen++
+	m.updCh = make(chan tea.Msg, 16)
+	m.workText = fmt.Sprintf("正在更新 %d 个工具…", len(targets))
+	ch, gen := m.updCh, m.updGen
+	return m, tea.Batch(m.spin.Tick, upgradeAllCmd(targets, ch, gen), waitUpd(ch, gen))
 }
 
 func (m *tuiModel) clampCursor() {
@@ -254,10 +371,13 @@ func (m tuiModel) viewList() string {
 	}
 	summary := fmt.Sprintf("  %d 个工具", len(m.states))
 	if behind > 0 {
-		summary += fmt.Sprintf(" · %d 个可升级", behind)
+		summary += fmt.Sprintf(" · %d 个可更新", behind)
 	}
 	if missing > 0 {
 		summary += fmt.Sprintf(" · %d 个未安装", missing)
+	}
+	if !m.checkedAt.IsZero() {
+		summary += " · 检查于 " + m.checkedAt.Format("15:04:05")
 	}
 	b.WriteString(sDim.Render(summary))
 	b.WriteString("\n\n")
@@ -267,29 +387,16 @@ func (m tuiModel) viewList() string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(hints("↑↓", "选择", "enter", "启动/安装", "u", "升级", "r", "刷新", "q", "退出"))
+	b.WriteString(hints("↑↓", "选择", "enter", "启动/安装", "u", "升级", "U", "一键全部更新", "r", "重新检查", "q", "退出"))
 	return b.String()
 }
 
 func (m tuiModel) renderCard(st toolState, selected bool) string {
 	w := m.contentWidth()
-
-	ver := st.Installed
-	if ver == "" {
-		ver = "未安装"
-	}
-	label := ver
-	if st.Behind() {
-		label = ver + " → " + st.Latest
-	} else if st.Missing() && st.Latest != "" {
-		label = "未安装 · 最新 " + st.Latest
-	}
 	status, style := statusStyle(st)
+	head := sText.Render(st.Tool.Key) + "   " + sText.Render(versionText(st)) + "   " + style.Render(status)
 
-	head := sText.Render(st.Tool.Key) + "   " + sText.Render(label) + "   " + style.Render(status)
-
-	desc := truncate(st.Tool.Desc, w)
-	line2 := sDim.Render(desc)
+	line2 := sDim.Render(truncate(st.Tool.Desc, w))
 
 	var line3 string
 	switch {
@@ -308,6 +415,22 @@ func (m tuiModel) renderCard(st toolState, selected bool) string {
 	return sCardOff.Render(body)
 }
 
+// versionText 把已装和最新都摆在卡片上：0.4.2 → 0.4.3 / 0.4.2 · 最新 0.4.2
+func versionText(st toolState) string {
+	switch {
+	case st.Installed == "" && st.Latest != "":
+		return "未安装 · 最新 " + st.Latest
+	case st.Installed == "":
+		return "未安装"
+	case st.Latest == "":
+		return "已装 " + st.Installed
+	case isNewer(st.Latest, st.Installed):
+		return st.Installed + " → " + st.Latest
+	default:
+		return st.Installed + " · 最新 " + st.Latest
+	}
+}
+
 func (m tuiModel) installHint() string {
 	if dir, err := installDir(); err == nil {
 		return dir
@@ -321,13 +444,29 @@ func (m tuiModel) viewWorking() string {
 }
 
 func (m tuiModel) viewResult() string {
+	allOK := true
+	for _, l := range m.resultLines {
+		if !l.ok {
+			allOK = false
+		}
+	}
 	head := sBad.Render("✗ 操作失败")
-	if m.resultOK {
+	if allOK {
 		head = sGood.Render("✓ 完成")
 	}
-	return sTitle.Render("hmck") + "  " + head + "\n\n" +
-		"  " + sText.Render(m.resultMsg) + "\n\n" +
-		hints("任意键", "返回")
+
+	var b strings.Builder
+	b.WriteString(sTitle.Render("hmck") + "  " + head + "\n\n")
+	for _, l := range m.resultLines {
+		style := sGood
+		if !l.ok {
+			style = sBad
+		}
+		b.WriteString("  " + style.Render(l.text) + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(hints("任意键", "返回"))
+	return b.String()
 }
 
 func (m tuiModel) contentWidth() int {
@@ -353,9 +492,9 @@ func statusStyle(st toolState) (string, lipgloss.Style) {
 	label, kind := st.Status()
 	switch kind {
 	case "ok":
-		return "✓ " + label, sGood
+		return "✓ 已是最新", sGood
 	case "behind":
-		return "↑ 可升级", sWarn
+		return "↑ 可更新", sWarn
 	case "missing":
 		return "按 enter 安装", sWarn
 	default:

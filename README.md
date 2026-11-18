@@ -12,20 +12,22 @@
 ```
 $ hmck
 hmck  我的命令行小工具
-  2 个工具
+  2 个工具 · 1 个可更新 · 检查于 15:42:07
 
-│ kube-token   0.4.2                   ✓ 已是最新
+│ kube-token   0.4.2 · 最新 0.4.2      ✓ 已是最新
 │ 粘贴新 token 替换 kubeconfig 里的旧值
 │ ~/.local/bin/kube-token
 │
-│ npm-token   0.1.0 → 0.1.1            ↑ 可升级
+│ npm-token   0.1.0 → 0.1.1            ↑ 可更新
 │ 检查并更新 ~/.npmrc 里的 registry token
 │ ~/.local/bin/npm-token
 
-  ↑↓ 选择  ·  enter 启动/安装  ·  u 升级  ·  r 刷新  ·  q 退出
+  ↑↓ 选择  ·  enter 启动/安装  ·  u 升级  ·  U 一键全部更新  ·  r 重新检查  ·  q 退出
 ```
 
-`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；`u` 升级选中的工具；没装的按 `enter` 就装。
+每个工具都同时显示已装版本和 GitHub 上的最新版本，能升的直接标 `0.1.0 → 0.1.1`。
+
+`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；`u` 升级选中的工具；`U` 把所有可更新的工具按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`r` 重新查一遍版本。
 
 ## 安装
 

@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestIsNewer(t *testing.T) {
@@ -185,5 +187,117 @@ func TestInstallToolUnsupportedPlatform(t *testing.T) {
 	tl := tool{Key: "fake", Repo: "o/r", Binary: "fake", Platforms: []string{"plan9/mips"}}
 	if _, err := installTool(toolState{Tool: tl, Latest: "1.0.0"}); err == nil {
 		t.Error("不支持的平台应当报错")
+	}
+}
+
+func TestUpgradeAllCmd(t *testing.T) {
+	payload := bytes.Repeat([]byte("BINARY"), 40_000)
+	srv := fakeReleaseServer(t, payload, "")
+	defer srv.Close()
+
+	old := releaseAssetURL
+	releaseAssetURL = func(repo, tag, asset string) string { return srv.URL + "/download/" + tag + "/" + asset }
+	defer func() { releaseAssetURL = old }()
+
+	dir := t.TempDir()
+	mk := func(key string) toolState {
+		tl := tool{Key: key, Repo: "o/r", Binary: key,
+			Platforms: []string{runtime.GOOS + "/" + runtime.GOARCH}}
+		target := filepath.Join(dir, binaryName(tl, runtime.GOOS))
+		if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return toolState{Tool: tl, Path: target, Installed: "0.0.0", Latest: "9.9.9"}
+	}
+	states := []toolState{mk("tool-a"), mk("tool-b")}
+	states[0].Installed, states[1].Installed = "0.0.1", "0.0.2"
+
+	ch := make(chan tea.Msg, 16)
+	type doneResult struct{ msg tea.Msg }
+	done := make(chan doneResult, 1)
+	go func() { done <- doneResult{upgradeAllCmd(states, ch, 7)()} }()
+
+	var progress []batchProgressMsg
+	for msg := range ch {
+		if p, ok := msg.(batchProgressMsg); ok && p.gen == 7 {
+			progress = append(progress, p)
+		}
+	}
+	res := (<-done).msg
+	batch, ok := res.(batchDoneMsg)
+	if !ok {
+		t.Fatalf("最后一条消息不是 batchDoneMsg: %T", res)
+	}
+	if batch.gen != 7 || len(batch.results) != 2 {
+		t.Fatalf("batch = %+v", batch)
+	}
+	if len(progress) != 2 || progress[0].index != 1 || progress[len(progress)-1].key != "tool-b" {
+		t.Errorf("进度消息不对: %+v", progress)
+	}
+	for i, r := range batch.results {
+		if r.err != nil {
+			t.Fatalf("%s 升级失败: %v", r.key, r.err)
+		}
+		if r.from != states[i].Installed || r.to != "9.9.9" {
+			t.Errorf("%s 结果 = %s → %s", r.key, r.from, r.to)
+		}
+		got, err := os.ReadFile(states[i].Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Errorf("%s 没被替换成新二进制", r.key)
+		}
+	}
+}
+
+func TestBatchDoneUpdatesModel(t *testing.T) {
+	m := newTUIModel()
+	m.state = working
+	m.updGen = 3
+	m.states = []toolState{
+		{Tool: tool{Key: "tool-a"}, Installed: "0.1.0", Latest: "0.2.0"},
+		{Tool: tool{Key: "tool-b"}, Installed: "0.1.0", Latest: "0.1.0"},
+	}
+
+	// 老一代的消息必须忽略
+	updated, _ := m.Update(batchDoneMsg{gen: 2, results: []installResult{{key: "tool-a", to: "0.2.0"}}})
+	if got := updated.(tuiModel); got.state != working || got.states[0].Installed != "0.1.0" {
+		t.Fatalf("旧消息被采纳了: state=%v ver=%s", got.state, got.states[0].Installed)
+	}
+
+	updated, _ = m.Update(batchDoneMsg{gen: 3, results: []installResult{
+		{key: "tool-a", from: "0.1.0", to: "0.2.0"},
+		{key: "tool-b", from: "0.1.0", to: "0.1.0"},
+	}})
+	got := updated.(tuiModel)
+	if got.state != result || len(got.resultLines) != 2 {
+		t.Fatalf("state=%v lines=%+v", got.state, got.resultLines)
+	}
+	if got.states[0].Installed != "0.2.0" || got.states[0].Behind() {
+		t.Errorf("tool-a 版本没更新: %+v", got.states[0])
+	}
+	if !strings.Contains(got.resultLines[0].text, "0.1.0 → 0.2.0") || !got.resultLines[0].ok {
+		t.Errorf("结果行 = %+v", got.resultLines[0])
+	}
+	if !got.resultLines[1].ok || !strings.Contains(got.resultLines[1].text, "已是最新") {
+		t.Errorf("结果行 = %+v", got.resultLines[1])
+	}
+}
+
+func TestVersionText(t *testing.T) {
+	cases := []struct {
+		st   toolState
+		want string
+	}{
+		{toolState{Installed: "0.4.2", Latest: "0.4.2"}, "0.4.2 · 最新 0.4.2"},
+		{toolState{Installed: "0.4.2", Latest: "0.4.3"}, "0.4.2 → 0.4.3"},
+		{toolState{Latest: "0.1.0"}, "未安装 · 最新 0.1.0"},
+		{toolState{Installed: "0.1.0"}, "已装 0.1.0"},
+	}
+	for _, c := range cases {
+		if got := versionText(c.st); got != c.want {
+			t.Errorf("versionText(%+v) = %q, want %q", c.st, got, c.want)
+		}
 	}
 }
