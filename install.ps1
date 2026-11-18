@@ -1,10 +1,10 @@
 # hmck 安装脚本（Windows）
 #
-#   irm https://raw.githubusercontent.com/hongmengchen/npm-token/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/hongmengchen/hmck/main/install.ps1 | iex
 #
 # 可选参数：
 #   -Version v0.1.0   装指定版本（默认最新）
-#   -BinDir C:\path   装到指定目录（默认 %LOCALAPPDATA%\npm-token）
+#   -BinDir C:\path   装到指定目录（默认 %LOCALAPPDATA%\hmck）
 param(
     [string]$Version = "",
     [string]$BinDir = ""
@@ -41,7 +41,7 @@ if ($Version) {
 }
 
 $asset = "${bin}_windows_${arch}.exe"
-$tmp = Join-Path $env:TEMP ("npm-token-" + [guid]::NewGuid().ToString("N") + ".exe")
+$tmp = Join-Path $env:TEMP ("hmck-" + [guid]::NewGuid().ToString("N") + ".exe")
 
 Write-Host "下载 $bin ($label, windows $arch)…"
 try {
@@ -67,7 +67,7 @@ try {
 Remove-Item -Force $sums -ErrorAction SilentlyContinue
 
 if (-not $BinDir) {
-    $BinDir = Join-Path $env:LOCALAPPDATA "npm-token"
+    $BinDir = Join-Path $env:LOCALAPPDATA "hmck"
 }
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
@@ -90,5 +90,8 @@ if (($userPath -split ";") -notcontains $BinDir) {
 $env:Path = $env:Path.TrimEnd(";") + ";" + $BinDir
 
 try { & $target version } catch { }
+
+# 顺手把 agent skill 写到 ~/.claude/skills（失败不影响安装）
+try { & $target skill --quiet 2>$null | Out-Null } catch { }
 
 Write-Host "`n运行 $bin 打开管理界面。" -ForegroundColor Green

@@ -1,7 +1,7 @@
 #!/bin/sh
 # hmck 安装脚本（macOS / Linux）
 #
-#   curl -fsSL https://raw.githubusercontent.com/hongmengchen/npm-token/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/hongmengchen/hmck/main/install.sh | sh
 #
 # 可选参数：
 #   -v, --version v0.1.0   装指定版本（默认最新）
@@ -71,7 +71,7 @@ else
   die "需要 curl 或 wget"
 fi
 
-tmp=$(mktemp -d 2>/dev/null || mktemp -d -t npm-token)
+tmp=$(mktemp -d 2>/dev/null || mktemp -d -t hmck)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 printf '下载 %s (%s %s)…\n' "$BIN" "$os" "$arch"
@@ -115,6 +115,9 @@ mv -f "$tmp/$asset" "$target"
 
 printf '已安装: %s\n' "$target"
 "$target" version || true
+
+# 顺手把 agent skill 写到 ~/.claude/skills（失败不影响安装）
+"$target" skill --quiet 2>/dev/null || true
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

@@ -11,16 +11,20 @@ import (
 	"time"
 )
 
-// tool 是 hmck 管理的一个独立工具。加新工具只需在这里加一条。
+// tool 是 hmck 管理的一个独立工具：内置的写在 registry 里，
+// 以后新增的可以直接 `hmck add owner/repo` 存进本机配置，不用重新编译 hmck。
 type tool struct {
-	Key         string   // 也用作发布资产前缀
-	Name        string   // 展示名
-	Desc        string   // 一句话说明
-	Repo        string   // GitHub owner/name
-	Binary      string   // 安装后的可执行文件名（不含 .exe）
-	Platforms   []string // 该工具发布过哪些 os/arch
-	Checksums   bool     // 发布里有没有 checksums.txt
-	PostInstall []string // 装完/升级后要跑的子命令（忽略失败）
+	Key         string   `json:"key"`                    // 也用作发布资产前缀
+	Name        string   `json:"name,omitempty"`         // 展示名，默认同 Key
+	Desc        string   `json:"desc,omitempty"`         // 一句话说明
+	Repo        string   `json:"repo"`                   // GitHub owner/name
+	Binary      string   `json:"binary,omitempty"`       // 安装后的可执行文件名（不含 .exe），默认同 Key
+	Platforms   []string `json:"platforms"`              // 该工具发布过哪些 os/arch
+	Checksums   bool     `json:"checksums,omitempty"`    // 发布里有没有 checksums.txt
+	Skill       bool     `json:"skill,omitempty"`        // 支不支持 `<tool> skill --quiet`
+	PostInstall []string `json:"post_install,omitempty"` // 装完/升级后要跑的子命令（忽略失败）
+
+	Custom bool `json:"-"` // 来自本机配置，不是内置
 }
 
 var registry = []tool{
@@ -35,6 +39,7 @@ var registry = []tool{
 			"linux/amd64", "linux/arm64",
 			"windows/amd64",
 		},
+		Skill:       true,
 		PostInstall: []string{"skill", "--quiet"},
 	},
 	{
@@ -48,13 +53,37 @@ var registry = []tool{
 			"linux/amd64", "linux/arm64",
 			"windows/amd64", "windows/arm64",
 		},
-		Checksums: true,
+		Checksums:   true,
+		Skill:       true,
+		PostInstall: []string{"skill", "--quiet"},
 	},
+}
+
+// allTools 是内置 + 本机配置里的自定义工具；key 冲突时内置优先
+func allTools() ([]tool, error) {
+	out := append([]tool(nil), registry...)
+	custom, err := loadCustomTools()
+	if err != nil {
+		return out, err
+	}
+	seen := make(map[string]bool, len(out))
+	for _, t := range out {
+		seen[strings.ToLower(t.Key)] = true
+	}
+	for _, t := range custom {
+		if seen[strings.ToLower(t.Key)] {
+			continue
+		}
+		seen[strings.ToLower(t.Key)] = true
+		out = append(out, t)
+	}
+	return out, nil
 }
 
 func toolByKey(key string) (tool, bool) {
 	k := strings.ToLower(strings.TrimSpace(key))
-	for _, t := range registry {
+	tools, _ := allTools()
+	for _, t := range tools {
 		if strings.ToLower(t.Key) == k || strings.ToLower(t.Binary) == k ||
 			strings.TrimSuffix(strings.ToLower(t.Key), "-token") == k {
 			return t, true

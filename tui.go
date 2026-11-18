@@ -60,13 +60,19 @@ type tuiModel struct {
 
 	workText    string
 	resultLines []resultLine
+	configErr   string
 
 	// 一键更新的进度通道；updGen 防止上一次的残留消息串进来
 	updCh  chan tea.Msg
 	updGen int
 }
 
-type inspectDoneMsg struct{ states []toolState }
+type inspectDoneMsg struct {
+	states []toolState
+	err    error
+}
+
+type skillDoneMsg struct{ lines []resultLine }
 
 type installDoneMsg struct {
 	key, from, version string
@@ -104,7 +110,38 @@ func (m tuiModel) Init() tea.Cmd {
 }
 
 func inspectCmd() tea.Cmd {
-	return func() tea.Msg { return inspectDoneMsg{states: inspectAll()} }
+	return func() tea.Msg {
+		states, err := inspectAll()
+		return inspectDoneMsg{states: states, err: err}
+	}
+}
+
+// skillCmd 装 hmck 自己的 skill，并刷新已安装工具的 skill
+func skillCmd() tea.Cmd {
+	return func() tea.Msg {
+		var lines []resultLine
+		path, changed, fresh, err := installSkill("")
+		if err != nil {
+			lines = append(lines, resultLine{text: "安装 hmck skill 失败: " + err.Error(), ok: false})
+			return skillDoneMsg{lines: lines}
+		}
+		switch {
+		case fresh:
+			lines = append(lines, resultLine{text: "hmck skill 已安装: " + shortenHome(path), ok: true})
+		case changed:
+			lines = append(lines, resultLine{text: "hmck skill 已更新: " + shortenHome(path), ok: true})
+		default:
+			lines = append(lines, resultLine{text: "hmck skill 已是最新: " + shortenHome(path), ok: true})
+		}
+		done, failed := refreshToolSkills(false)
+		if len(done) > 0 {
+			lines = append(lines, resultLine{text: "已刷新 " + strings.Join(done, "、") + " 的 skill", ok: true})
+		}
+		if len(failed) > 0 {
+			lines = append(lines, resultLine{text: "没刷新成功（版本太旧？）: " + strings.Join(failed, "、"), ok: false})
+		}
+		return skillDoneMsg{lines: lines}
+	}
 }
 
 func installCmd(st toolState) tea.Cmd {
@@ -169,9 +206,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case inspectDoneMsg:
 		m.states = msg.states
+		if msg.err != nil {
+			m.configErr = msg.err.Error()
+		} else {
+			m.configErr = ""
+		}
 		m.checkedAt = time.Now()
 		m.state = list
 		m.clampCursor()
+
+	case skillDoneMsg:
+		m.state = result
+		m.resultLines = msg.lines
+		if len(m.resultLines) == 0 {
+			m.resultLines = []resultLine{{text: "没有需要处理的 skill", ok: true}}
+		}
 
 	case installDoneMsg:
 		m.state = result
@@ -277,6 +326,10 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "U":
 			return m.startUpgradeAll()
+		case "s":
+			m.state = working
+			m.workText = "正在安装 agent skill…"
+			return m, tea.Batch(m.spin.Tick, skillCmd())
 		case "r":
 			m.state = loading
 			return m, tea.Batch(m.spin.Tick, inspectCmd())
@@ -380,21 +433,30 @@ func (m tuiModel) viewList() string {
 		summary += " · 检查于 " + m.checkedAt.Format("15:04:05")
 	}
 	b.WriteString(sDim.Render(summary))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if m.configErr != "" {
+		b.WriteString(sWarn.Render("  自定义工具配置有问题: " + truncate(m.configErr, m.contentWidth())))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	for i, st := range m.states {
 		b.WriteString(m.renderCard(st, i == m.cursor))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(hints("↑↓", "选择", "enter", "启动/安装", "u", "升级", "U", "一键全部更新", "r", "重新检查", "q", "退出"))
+	b.WriteString(hints("↑↓", "选择", "enter", "启动/安装", "u", "升级", "U", "一键全部更新", "s", "装 skill", "r", "重新检查", "q", "退出"))
 	return b.String()
 }
 
 func (m tuiModel) renderCard(st toolState, selected bool) string {
 	w := m.contentWidth()
 	status, style := statusStyle(st)
-	head := sText.Render(st.Tool.Key) + "   " + sText.Render(versionText(st)) + "   " + style.Render(status)
+	name := st.Tool.Key
+	if st.Tool.Custom {
+		name += sDim.Render(" · 自定义")
+	}
+	head := sText.Render(name) + "   " + sText.Render(versionText(st)) + "   " + style.Render(status)
 
 	line2 := sDim.Render(truncate(st.Tool.Desc, w))
 

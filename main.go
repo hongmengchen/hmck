@@ -12,7 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-var version = "0.2.0"
+var version = "0.3.0"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -35,6 +35,12 @@ func run(args []string) int {
 		return runInstall(rest)
 	case "upgrade", "update":
 		return runUpgrade(rest)
+	case "add":
+		return runAdd(rest)
+	case "rm", "remove":
+		return runRemove(rest)
+	case "skill":
+		return runSkill(rest)
 	case "tui":
 		return runTUI()
 	case "version", "-v", "--version":
@@ -59,13 +65,21 @@ func usage(w io.Writer) {
   hmck run <tool> [参数…]  启动工具，参数原样传给它
   hmck install <tool>      安装最新版（--force 重装）
   hmck upgrade [<tool>]    升级；不带参数就升级所有可升级的工具
+  hmck add <owner/repo>    把一个新工具加进本机配置，之后就能 install/upgrade
+  hmck rm <tool>           删掉自定义工具（内置的删不了）
+  hmck skill               给 hmck 和已安装的工具装 agent skill
   hmck version
   hmck help
 
 管理的工具:
 `, version)
-	for _, t := range registry {
-		fmt.Fprintf(w, "  %-12s %s\n", t.Key, t.Desc)
+	tools, _ := allTools()
+	for _, t := range tools {
+		mark := ""
+		if t.Custom {
+			mark = "（自定义）"
+		}
+		fmt.Fprintf(w, "  %-12s %s%s\n", t.Key, t.Desc, mark)
 	}
 	fmt.Fprintf(w, `
 例:
@@ -85,6 +99,7 @@ type listItem struct {
 	Path       string `json:"path,omitempty"`
 	Status     string `json:"status"`
 	Upgradable bool   `json:"upgradable"`
+	Custom     bool   `json:"custom,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
 
@@ -98,7 +113,10 @@ func runList(args []string) int {
 		return 2
 	}
 
-	states := inspectAll()
+	states, cfgErr := inspectAll()
+	if cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "自定义工具配置有问题: %v\n", cfgErr)
+	}
 	if asJSON {
 		items := make([]listItem, 0, len(states))
 		for _, st := range states {
@@ -157,23 +175,24 @@ func toListItem(st toolState) listItem {
 	return listItem{
 		Key: st.Tool.Key, Name: st.Tool.Name,
 		Installed: st.Installed, Latest: st.Latest, Path: shortenHome(st.Path),
-		Status: label, Upgradable: st.Behind(), Error: st.CheckErr,
+		Status: label, Upgradable: st.Behind(), Custom: st.Tool.Custom, Error: st.CheckErr,
 	}
 }
 
-func inspectAll() []toolState {
-	states := make([]toolState, len(registry))
-	done := make(chan int, len(registry))
-	for i, t := range registry {
+func inspectAll() ([]toolState, error) {
+	tools, err := allTools()
+	states := make([]toolState, len(tools))
+	done := make(chan int, len(tools))
+	for i, t := range tools {
 		go func(i int, t tool) {
 			states[i] = inspect(t)
 			done <- i
 		}(i, t)
 	}
-	for range registry {
+	for range tools {
 		<-done
 	}
-	return states
+	return states, err
 }
 
 // ---------- run ----------
@@ -256,10 +275,17 @@ func runUpgrade(args []string) int {
 			targets = append(targets, t)
 		}
 	} else {
-		targets = registry
+		var err error
+		if targets, err = allTools(); err != nil {
+			fmt.Fprintf(os.Stderr, "自定义工具配置有问题: %v\n", err)
+			targets = registry
+		}
 	}
 
-	states := inspectAll()
+	states, cfgErr := inspectAll()
+	if cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "自定义工具配置有问题: %v\n", cfgErr)
+	}
 	byKey := map[string]toolState{}
 	for _, st := range states {
 		byKey[st.Tool.Key] = st
@@ -315,11 +341,119 @@ func doInstall(st toolState, force bool) int {
 }
 
 func keysText() string {
+	tools, _ := allTools()
 	var keys []string
-	for _, t := range registry {
+	for _, t := range tools {
 		keys = append(keys, t.Key)
 	}
 	return strings.Join(keys, ", ")
+}
+
+// ---------- 自定义工具 ----------
+
+func runAdd(args []string) int {
+	fs := flag.NewFlagSet("add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var key, desc, binary, platforms string
+	var checksums, skill, force bool
+	fs.StringVar(&key, "key", "", "工具 key（也用作发布资产前缀，默认取仓库名）")
+	fs.StringVar(&desc, "desc", "", "一句话说明")
+	fs.StringVar(&binary, "binary", "", "可执行文件名（默认同 key）")
+	fs.StringVar(&platforms, "platforms", "", "支持的平台，逗号分隔，如 darwin/arm64,linux/amd64")
+	fs.BoolVar(&checksums, "checksums", false, "发布里有 checksums.txt（默认自动探测）")
+	fs.BoolVar(&skill, "skill", false, "该工具支持 `<tool> skill --quiet`")
+	fs.BoolVar(&force, "force", false, "覆盖同名的自定义工具")
+	valueFlags := map[string]bool{"key": true, "desc": true, "binary": true, "platforms": true}
+	if err := fs.Parse(reorderArgs(args, valueFlags)); err != nil {
+		fmt.Fprintln(os.Stderr, "参数不对: "+err.Error())
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "用法: hmck add <owner/repo> [--key NAME] [--desc 说明] [--platforms list] [--checksums] [--skill]")
+		return 2
+	}
+	repo, err := parseRepo(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		return 2
+	}
+	if key == "" {
+		key = defaultKeyForRepo(repo)
+	}
+
+	t := tool{Key: key, Name: key, Desc: desc, Repo: repo, Binary: binary,
+		Checksums: checksums, Skill: skill}
+
+	if platforms != "" {
+		t.Platforms = splitList(platforms)
+	} else {
+		info, err := fetchReleaseInfo(repo)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "提示: 没读到 %s 的 release（%v），先按常见平台记录\n", repo, err)
+			t.Platforms = append([]string(nil), defaultPlatforms...)
+		} else {
+			t.Platforms = inferPlatforms(key, info.Assets)
+			if len(t.Platforms) == 0 {
+				fmt.Fprintf(os.Stderr, "提示: release 里没有 %s_<os>_<arch> 资产，先按常见平台记录\n", key)
+				t.Platforms = append([]string(nil), defaultPlatforms...)
+			}
+			if hasChecksums(info.Assets) {
+				t.Checksums = true
+			}
+		}
+	}
+
+	path, err := addCustomTool(t, force)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		return 2
+	}
+
+	fmt.Printf("已添加 %s → %s\n", t.Key, t.Repo)
+	if t.Desc != "" {
+		fmt.Printf("说明    %s\n", t.Desc)
+	}
+	fmt.Printf("平台    %s\n", strings.Join(t.Platforms, ", "))
+	if t.Checksums {
+		fmt.Println("校验    发布里有 checksums.txt，升级时校验 SHA-256")
+	}
+	if t.Skill {
+		fmt.Println("skill   装完/升级后会跑 " + t.Key + " skill --quiet")
+	}
+	fmt.Printf("配置    %s\n", shortenHome(path))
+	fmt.Printf("\n接下来: hmck install %s\n", t.Key)
+	return 0
+}
+
+func runRemove(args []string) int {
+	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(reorderFlags(args)); err != nil {
+		fmt.Fprintln(os.Stderr, "参数不对: "+err.Error())
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "用法: hmck rm <tool>")
+		return 2
+	}
+	path, err := removeCustomTool(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		return 2
+	}
+	fmt.Printf("已从配置里删掉 %s\n配置    %s\n", fs.Arg(0), shortenHome(path))
+	fmt.Println("（已经装好的二进制不会自动删除；要删文件自己去对应目录）")
+	return 0
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ---------- 颜色 ----------
@@ -333,13 +467,25 @@ func dim(s string, color bool) string {
 
 // reorderFlags 让 `hmck upgrade npm-token --force` 和 `--force npm-token` 都能用
 func reorderFlags(args []string) []string {
+	return reorderArgs(args, nil)
+}
+
+// reorderArgs 把选项挪到位置参数前面；valueFlags 里的选项会连值一起挪，
+// 这样 `hmck add owner/repo --desc 一句话` 也能正常解析。
+func reorderArgs(args []string, valueFlags map[string]bool) []string {
 	var flags, rest []string
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if strings.HasPrefix(a, "-") && a != "-" {
 			flags = append(flags, a)
-		} else {
-			rest = append(rest, a)
+			name := strings.TrimLeft(a, "-")
+			if !strings.Contains(name, "=") && valueFlags[name] && i+1 < len(args) {
+				flags = append(flags, args[i+1])
+				i++
+			}
+			continue
 		}
+		rest = append(rest, a)
 	}
 	return append(flags, rest...)
 }

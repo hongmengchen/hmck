@@ -106,6 +106,50 @@ func latestTagViaAPI(repo string) (string, error) {
 	return rel.TagName, nil
 }
 
+// releaseInfo 是一次 release 查询的结果，用来在 `hmck add` 时推断平台和校验文件
+type releaseInfo struct {
+	Tag    string
+	Assets []string
+}
+
+func fetchReleaseInfo(repo string) (releaseInfo, error) {
+	req, err := http.NewRequest(http.MethodGet, releaseAPIURL(repo), nil)
+	if err != nil {
+		return releaseInfo{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "hmck/"+version)
+	resp, err := apiClient.Do(req)
+	if err != nil {
+		return releaseInfo{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusForbidden, http.StatusTooManyRequests:
+		return releaseInfo{}, errors.New("GitHub API 限流了，稍后再试")
+	case http.StatusNotFound:
+		return releaseInfo{}, fmt.Errorf("%s 还没有发布 release", repo)
+	default:
+		return releaseInfo{}, fmt.Errorf("GitHub 返回 %s", resp.Status)
+	}
+
+	var rel struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
+			Name string `json:"name"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return releaseInfo{}, err
+	}
+	info := releaseInfo{Tag: rel.TagName}
+	for _, a := range rel.Assets {
+		info.Assets = append(info.Assets, a.Name)
+	}
+	return info, nil
+}
+
 // installTool 下载并替换成最新版；返回装好的版本号
 func installTool(st toolState) (string, error) {
 	t := st.Tool
