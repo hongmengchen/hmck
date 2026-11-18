@@ -157,3 +157,7 @@ hmck skill --no-tools   # 只装 hmck 自己的
 go test ./...
 go build -o hmck .
 ```
+
+## License
+
+本项目采用 [MIT](LICENSE) 协议，Copyright (c) 2026 chenliang。
