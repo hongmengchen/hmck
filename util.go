@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // clampInt 把 v 收在 [lo, hi] 里
@@ -20,12 +22,10 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
+// isTTY 判断是不是真终端。/dev/null 也是字符设备，光看 ModeCharDevice
+// 会把它当成终端——脚本里 `< /dev/null` 跑卸载时就会以为有人能敲名字
 func isTTY(f *os.File) bool {
-	st, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return st.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(f.Fd()))
 }
 
 // shortenHome 把家目录前缀换成 ~，输出短一点

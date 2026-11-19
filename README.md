@@ -109,7 +109,7 @@ hmck info glab               # 终端里看同一份；--json 给脚本用
 
 ### 卸载
 
-列表里按 `d`（信息页里也行）先进确认页：摊开「删什么、留什么」，按 `y` 才动手，`n` / `esc` 算了。所有工具都能卸，hmck 自己也能——卸载自己时进程还在，看完结果页按任意键退出。
+列表里按 `d`（信息页里也行）先进确认页：摊开「删什么、留什么」，再把工具名敲一遍、按 `enter` 才动手，`esc` 算了。敲错名字不会删，只会提示重敲。所有工具都能卸，hmck 自己也能——卸载自己时进程还在，看完结果页按任意键退出。
 
 hmck 只删自己装出来的那一份：
 
@@ -121,9 +121,13 @@ hmck 只删自己装出来的那一份：
 不动的：PATH 上别人装的同名程序（brew 的 glab 之类，确认页里列出来并注明「不是 hmck 装的」）、自定义工具的配置（要删用 `hmck rm`）、`~/.npmrc`、kubeconfig 这些工具自己的配置。
 
 ```bash
-hmck uninstall glab              # 卸掉 hmck 装的那份
+hmck uninstall glab              # 先摊开要删的清单，再敲一遍工具名
 hmck uninstall glab --keep-skill # 二进制删掉，skill 留着
+hmck uninstall glab --yes        # 不再确认，直接删（脚本 / agent 用）
 ```
+
+命令行和 TUI 一样要二次确认：打印清单后，输入工具名回车才删，敲错或直接回车都算取消。
+stdin 不是终端时（脚本、agent）不会停下来问，也不删，要删必须显式加 `--yes`。
 
 ## 安装
 
@@ -161,7 +165,7 @@ hmck upgrade npm-token    # 只升一个
 hmck upgrade --force      # 已是最新也重装一遍
 hmck changelog npm-token  # 看最近几个版本改了什么（--versions N）
 hmck info glab            # 版本、位置，glab 还有登录状态（--json 给脚本）
-hmck uninstall npm-token  # 卸掉 hmck 装的那份（--keep-skill 保留 skill）
+hmck uninstall npm-token  # 卸掉 hmck 装的那份（先敲工具名确认；--yes 跳过）
 hmck skill                # 给 hmck 和已安装的工具装 agent skill
 ```
 

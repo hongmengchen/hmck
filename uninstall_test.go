@@ -172,7 +172,7 @@ func TestUninstallKeepsCustomConfig(t *testing.T) {
 	}
 }
 
-// 确认页上「删」和「留」都得摆出来，别让人按 y 之前看不见
+// 确认页上「删」和「留」都得摆出来，别让人敲名字之前看不见
 func TestUninstallPreview(t *testing.T) {
 	sb := newUninstallSandbox(t)
 	tl := tool{Key: "kube-token", Binary: "kube-token"}

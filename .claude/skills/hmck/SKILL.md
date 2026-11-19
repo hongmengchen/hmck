@@ -19,7 +19,8 @@ CLI 的每个动作都有对应命令，输出也可以 `--json`。
 2. **不要擅自改用户的真实配置。** `~/.npmrc`、`~/.kube/config` 的写入交给 kube-token /
    npm-token 自己做（它们会自动备份、复验、必要时还原），agent 不要手改文件。
 3. **升级和卸载只走 hmck。** 不要用 `go install`、手动下载二进制或改 PATH 来「修好」某个工具，
-   也不要手动 `rm` 来卸载；`hmck upgrade` 会校验 checksum 并原子替换，`hmck uninstall` 只删 hmck 装出来的那份。
+   也不要手动 `rm` 来卸载；`hmck upgrade` 会校验 checksum 并原子替换，`hmck uninstall` 只删 hmck 装出来的那份，
+   且要敲工具名确认——非交互环境只有用户明确同意后才加 `--yes`。
 4. **不确定用户要不要装/升级/卸载时先问。** 这些动作会写或删用户的 `~/.local/bin`
    （Windows 是 `%USERPROFILE%\.local\bin`，或工具当前所在位置），属于会改系统的动作；看版本、列清单、看信息则随便跑。
 
@@ -99,7 +100,12 @@ hmck 自己那份优先（在 PATH 前面），没有也不另装——两个 gl
 ```bash
 hmck uninstall glab               # 删掉 hmck 装的那一份
 hmck uninstall glab --keep-skill  # 二进制删掉，agent skill 留着
+hmck uninstall glab --yes         # 不再确认，直接删（脚本 / agent 用）
 ```
+
+卸载要二次确认，免得手滑删掉：TUI 里把工具名敲一遍再按 `enter`；CLI 先打印要删的清单，
+再输入工具名回车，敲错或直接回车都算取消。**agent 在非交互环境里跑 `hmck uninstall` 不会停下来问，
+而是直接拒绝**；确实要删（用户已明确同意）就加 `--yes`，不要绕道手动 `rm`。
 
 删的是：二进制（`~/.local/bin/<tool>`）、带 `SKILL.md` 的 `~/.claude/skills/<tool>/`、
 只属于它的预下载缓存、它的更新时间记录。不删：PATH 上别的副本（结果里说明「不是 hmck 装的」）、
@@ -110,7 +116,7 @@ hmck 自己也能卸（TUI 里选到 hmck 按 `d`，或 `hmck uninstall hmck`）
 按任意键就退出。没有 hmck 装的那份时（比如只有 brew 的 glab），命令返回非零并说明
 「hmck 目录里没有 <tool>」，不会假装删掉了。
 
-CLI 的退出码：0 成功，1 没删成功（会写原因），2 参数不对。
+CLI 的退出码：0 成功，1 没删成功或取消（会写原因），2 参数不对（包括非交互时没加 `--yes`）。
 
 ## 看更新日志
 

@@ -14,7 +14,7 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.10.1"
+var version = "0.10.2"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -79,7 +79,7 @@ func usage(w io.Writer) {
   hmck info <tool>         看这个工具装着没、装在哪、登录状态（--json）
   hmck changelog <tool>    看这个工具最近几个版本改了什么（--versions N，默认 5）
   hmck add <owner/repo>    把一个新工具加进本机配置，之后就能 install/upgrade
-  hmck uninstall <tool>    卸载 hmck 装的那份（--keep-skill 保留 skill；hmck 自己也能卸）
+  hmck uninstall <tool>    卸载 hmck 装的那份（要敲工具名确认；--keep-skill 保留 skill，--yes 跳过确认）
   hmck rm <tool>           删掉自定义工具的配置（内置的删不了）
   hmck skill               给 hmck 和已安装的工具装 agent skill
   hmck version
@@ -638,18 +638,26 @@ func runUninstall(args []string) int {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	keepSkill := fs.Bool("keep-skill", false, "保留 agent skill")
+	yes := fs.Bool("yes", false, "不再确认，直接删（脚本 / agent 用）")
 	if err := fs.Parse(reorderFlags(args)); err != nil {
 		fmt.Fprintln(os.Stderr, "参数不对: "+err.Error())
 		return 2
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "用法: hmck uninstall <tool> [--keep-skill]")
+		fmt.Fprintln(os.Stderr, "用法: hmck uninstall <tool> [--keep-skill] [--yes]")
 		return 2
 	}
 	t, ok := toolByKey(fs.Arg(0))
 	if !ok {
 		fmt.Fprintf(os.Stderr, "没有这个工具: %s\n", fs.Arg(0))
 		return 2
+	}
+
+	// 没有 hmck 装的那份就没什么可删的：照旧说清楚，不必再问一遍
+	if managedCopy(t) != "" && !*yes {
+		if code := confirmUninstallCLI(os.Stdin, os.Stdout, inspectLocal(t), isTTY(os.Stdin)); code != 0 {
+			return code
+		}
 	}
 
 	res := uninstallTool(t, *keepSkill)

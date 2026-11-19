@@ -87,9 +87,17 @@ type tuiModel struct {
 }
 
 // uninstallView 是卸载确认页的状态：带上整个 toolState，
-// 页面上才能说清删哪一份、PATH 上还有哪份要留着
+// 页面上才能说清删哪一份、PATH 上还有哪份要留着。
+// typed 是已经敲进去的字，敲出的名字和工具名对上了才真删——手滑按一下不该删掉东西
 type uninstallView struct {
-	tool toolState
+	tool  toolState
+	typed string
+	err   string // 名字没敲对时的提醒
+}
+
+// nameMatches 判断敲进来的字是不是这个工具名：忽略大小写和首尾空格
+func (v uninstallView) nameMatches() bool {
+	return strings.EqualFold(strings.TrimSpace(v.typed), v.tool.Tool.Key)
 }
 
 // infoView 是信息页的状态：只记看的是哪个工具，内容每次从 states 现算，
@@ -691,18 +699,36 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case confirmUninstall:
-		switch k.String() {
-		case "y", "Y":
+		// 要敲工具名：q 之类的键得能打进输入框，所以退出只认 ctrl+c
+		switch {
+		case k.String() == "ctrl+c":
+			return m, tea.Quit
+		case k.String() == "esc":
+			m.state = list
+			m.confirm = uninstallView{}
+			return m, nil
+		case k.String() == "enter":
+			if !m.confirm.nameMatches() {
+				m.confirm.err = "名字不对，没删。照着上面那行敲 " + m.confirm.tool.Tool.Key
+				return m, nil
+			}
 			st := m.confirm.tool
 			m.state = working
 			m.workText = "正在卸载 " + st.Tool.Key + "…"
 			return m, tea.Batch(m.spin.Tick, uninstallCmd(st.Tool, false))
-		case "n", "N", "esc":
-			m.state = list
-			m.confirm = uninstallView{}
+		case k.String() == "backspace":
+			if r := []rune(m.confirm.typed); len(r) > 0 {
+				m.confirm.typed = string(r[:len(r)-1])
+			}
+			m.confirm.err = ""
 			return m, nil
-		case "q":
-			return m, tea.Quit
+		case k.Type == tea.KeyRunes:
+			// 工具名都不长，限制一下长度；粘贴进来一长串也不至于撑破页面
+			if r := []rune(m.confirm.typed); len(r) < 64 {
+				m.confirm.typed += string(k.Runes)
+			}
+			m.confirm.err = ""
+			return m, nil
 		}
 		return m, nil
 
@@ -920,7 +946,7 @@ func (m tuiModel) startInfo() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// startUninstall 按 d 之后先进确认页：删哪一份、留哪一份，看完再按 y。
+// startUninstall 按 d 之后先进确认页：删哪一份、留哪一份，看完把工具名敲一遍才动手。
 // hmck 目录里没有这个工具就直接说清楚，不开一个空确认页
 func (m tuiModel) startUninstall(st toolState) (tea.Model, tea.Cmd) {
 	if managedCopy(st.Tool) == "" {
@@ -1455,7 +1481,7 @@ func (m tuiModel) viewInfo() string {
 	return b.String()
 }
 
-// viewConfirm 是卸载确认页：先摊开删什么、留什么，再让人按 y。
+// viewConfirm 是卸载确认页：先摊开删什么、留什么，再让人把工具名敲一遍。
 // 删列表用的是和 info 页同一套行格式，颜色一眼就能分出「删」和「留」
 func (m tuiModel) viewConfirm() string {
 	st := m.confirm.tool
@@ -1464,7 +1490,7 @@ func (m tuiModel) viewConfirm() string {
 
 	head := []string{
 		styles.Title.Render(st.Tool.Key) + styles.Dim.Render("  卸载"),
-		styles.Warn.Render("按 y 确认，下面这些会被删掉"),
+		styles.Warn.Render("下面这些会被删掉"),
 		styles.Dim.Render(st.Tool.Repo),
 	}
 	var b strings.Builder
@@ -1491,7 +1517,19 @@ func (m tuiModel) viewConfirm() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(m.viewHints("y", "确认卸载", "n/esc", "算了", "q", "退出"))
+	b.WriteString("  " + styles.Dim.Render("输入 ") + styles.Key.Render(st.Tool.Key) +
+		styles.Dim.Render(" 再按 enter 删除，esc 取消") + "\n")
+	cursor := styles.Accent.Render("> ") + m.confirm.typed + styles.Accent.Render("█")
+	if m.confirm.nameMatches() {
+		cursor = styles.Good.Render("> ") + styles.Good.Render(m.confirm.typed) + styles.Good.Render("█")
+	}
+	b.WriteString(cursor + "\n")
+	if m.confirm.err != "" {
+		b.WriteString("  " + styles.Bad.Render(m.confirm.err) + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(m.viewHints("enter", "确认卸载", "esc", "算了", "ctrl+c", "退出"))
 	return b.String()
 }
 

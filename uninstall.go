@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,7 +139,7 @@ func cachedFiles(t tool) []string {
 	return out
 }
 
-// uninstallPreview 是确认页上的清单：删什么、留什么，按 y 之前先看明白
+// uninstallPreview 是确认页上的清单：删什么、留什么，动手之前先看明白
 func uninstallPreview(st toolState) []infoField {
 	var out []infoField
 	if bin := managedCopy(st.Tool); bin != "" {
@@ -161,6 +163,39 @@ func uninstallPreview(st toolState) []infoField {
 		out = append(out, infoField{Key: "保留", Value: "自定义工具配置（要一起删用 hmck rm）"})
 	}
 	return out
+}
+
+// uninstallPreviewText 把清单排成 CLI 上的几行：缩进两格，删和留各占一行
+func uninstallPreviewText(st toolState) []string {
+	fields := uninstallPreview(st)
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		out = append(out, "  "+f.Key+"  "+f.Value)
+	}
+	return out
+}
+
+// confirmUninstallCLI 先摊开将删的清单，再要人把工具名敲一遍；敲对了返回 0。
+// interactive 为假（stdin 不是终端，脚本 / agent 在用）时不问也不删，
+// 叫人加 --yes 再来；敲错则取消。都不是「删失败」，但也没删成，返回非零
+func confirmUninstallCLI(in io.Reader, out io.Writer, st toolState, interactive bool) int {
+	t := st.Tool
+	fmt.Fprintf(out, "要卸载 %s：\n", t.Key)
+	for _, l := range uninstallPreviewText(st) {
+		fmt.Fprintln(out, l)
+	}
+	fmt.Fprintln(out)
+	if !interactive {
+		fmt.Fprintf(out, "stdin 不是终端，没删。确认要删请加 --yes：hmck uninstall %s --yes\n", t.Key)
+		return 2
+	}
+	fmt.Fprintf(out, "输入 %s 再按回车删除，别的任意输入取消: ", t.Key)
+	line, _ := bufio.NewReader(in).ReadString('\n')
+	if !strings.EqualFold(strings.TrimSpace(line), t.Key) {
+		fmt.Fprintln(out, "已取消，什么都没删")
+		return 1
+	}
+	return 0
 }
 
 // lines 把结果翻成结果页上的几行
