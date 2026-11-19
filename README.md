@@ -25,19 +25,25 @@ $ hmck
 │ ↑ │  3 个工具 · 1 个可更新 · 检查于 15:42:07
 ╰───╯  a 自动下载最新版 [关]    A 自动安装最新版 [关]
 
-│ kube-token  ✓ 0.6.2                                        12 天前更新
-│    粘贴新 token 替换 kubeconfig 里的旧值                    ~/.local/bin/kube-token
+▌ ╱───╲  kube-token  ✓ 0.8.0                                        10 小时前更新
+▌ │ K │     粘贴新 token 替换 kubeconfig 里的旧值                    ~/.local/bin/kube-token
+▌ ╲───╱  hongmengchen/kube-token  ·  v0.8.0  Vault 登录缓存：第一次按 v 输入密码…
   ──────────────────────────────────────────────────────────────────────────
-│ npm-token   ✓ 0.4.1                                         3 小时前更新
-│    检查并更新 ~/.npmrc 里的 registry token                  ~/.local/bin/npm-token
+│ ┌───┐  npm-token   ✓ 0.5.0                                         3 小时前更新
+│ │ N │     检查并更新 ~/.npmrc 里的 registry token                  ~/.local/bin/npm-token
+│ └───┘  hongmengchen/npm-token  ·  v0.5.0  npm-token 有了自己的标志…
   ──────────────────────────────────────────────────────────────────────────
-│ hmck        ↑ 0.7.1 → 0.8.0                                    刚刚更新
-│    管理这些命令行小工具，包括它自己                             ~/.local/bin/hmck
+│ ╭───╮  hmck        ↑ 0.8.0 → 0.9.0                                    刚刚更新
+│ │ ↑ │     管理这些命令行小工具，包括它自己                             ~/.local/bin/hmck
+│ ╰───╯  hongmengchen/hmck  ·  v0.9.0  列表里每个工具都带自己的招牌…
 
-  ↑↓ 选择  ·  enter 启动/安装  ·  u 升级  ·  U 全部更新  ·  s 装 skill  ·  r 重新检查  ·  q 退出
+  ↑↓ 选择  ·  enter 启动/安装  ·  u 升级  ·  U 全部更新  ·  g 更新日志  ·  s 装 skill
+  r 重新检查  ·  q 退出
 ```
 
-打开后先列出本地工具（版本、安装位置），最新版在后台查询；查到哪个就刷新哪张卡片，查询期间那一格显示转圈，不用对着一个空白的加载页等网络。左上角的招牌和仓库里的 [`docs/logo.svg`](docs/logo.svg) 是同一套几何（方框 + 向上的箭头，也用纯文字画着，不依赖图片和字体）。每个工具占一块，中间用淡线隔开：第一行是名称和版本，第二行左边是它干什么、右边是装在哪。
+打开后先列出本地工具（版本、安装位置），最新版在后台查询；查到哪个就刷新哪张卡片，查询期间那一格显示转圈，不用对着一个空白的加载页等网络。左上角的招牌和仓库里的 [`docs/logo.svg`](docs/logo.svg) 是同一套几何（方框 + 向上的箭头，也用纯文字画着，不依赖图片和字体）。每个工具占一块，中间用淡线隔开：左边是该工具自己的招牌（kube-token 的六边形 + K、npm-token 的方框 + N、hmck 的方框 + ↑），右边三行分别是「名称和版本」「它干什么 / 装在哪」「仓库和最近一版改了什么」。
+
+第三行的更新日志预览是启动时顺手从各仓库的 `CHANGELOG.md` 抓回来的（没有就退到 release notes），失败也不影响列表。自定义工具用同款方框放名字首字母。
 
 状态只用一个图标表示，不再和版本号重复写「最新」：
 
@@ -51,7 +57,18 @@ $ hmck
 
 第一行最右边是**上一次版本更新时间**：hmck 自己装上/升级成功时记进 `state.json`（和 `config.json` 同目录），显示成「刚刚更新 / 3 小时前更新 / 12 天前更新」，超过一个月给日期。不是 hmck 装的（手动替换、从别处拷过来的），就用二进制文件的修改时间兜底，所以每个装好的工具都有时间可看。
 
-`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
+`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`g` 看选中工具的更新日志；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
+
+### 更新日志
+
+`g` 打开一页版本说明：左边是所选工具的招牌，右边标出「当前 / 最新」，下面是最近 5 个版本的小节和条目（`↑↓` 滚动、`pgup/pgdn` 翻页、`r` 重新拉取、`esc` 返回）。内容优先读仓库里的 `CHANGELOG.md`（`main` 分支，最全），没有这个文件就退到 GitHub 的 release notes；带 `GH_TOKEN` / `GITHUB_TOKEN` 时请求会带上，免得撞 API 限流。
+
+命令行里也能看，适合脚本和 agent：
+
+```bash
+hmck changelog kube-token            # 最近 5 个版本
+hmck changelog kube-token --versions 2
+```
 
 两个开关用 `a` / `A` 切换，立即生效并写进配置：
 
@@ -96,6 +113,7 @@ hmck upgrade              # 升级所有可升级的工具（包括 hmck 自己�
 hmck upgrade hmck         # 只升级 hmck 自己
 hmck upgrade npm-token    # 只升一个
 hmck upgrade --force      # 已是最新也重装一遍
+hmck changelog npm-token  # 看最近几个版本改了什么（--versions N）
 hmck skill                # 给 hmck 和已安装的工具装 agent skill
 ```
 

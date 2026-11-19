@@ -14,7 +14,7 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.8.0"
+var version = "0.9.0"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -40,6 +40,8 @@ func run(args []string) int {
 		return runInstall(rest)
 	case "upgrade", "update":
 		return runUpgrade(rest)
+	case "changelog", "changes", "notes":
+		return runChangelog(rest)
 	case "add":
 		return runAdd(rest)
 	case "rm", "remove":
@@ -70,6 +72,7 @@ func usage(w io.Writer) {
   hmck run <tool> [参数…]  启动工具，参数原样传给它
   hmck install <tool>      安装最新版（--force 重装）
   hmck upgrade [<tool>]    升级；不带参数就升级所有可升级的工具（包括 hmck 自己）
+  hmck changelog <tool>    看这个工具最近几个版本改了什么（--versions N，默认 5）
   hmck add <owner/repo>    把一个新工具加进本机配置，之后就能 install/upgrade
   hmck rm <tool>           删掉自定义工具（内置的删不了）
   hmck skill               给 hmck 和已安装的工具装 agent skill
@@ -381,6 +384,46 @@ func doInstall(st toolState, force bool) int {
 	} else {
 		fmt.Printf("%s: %s 已就绪  %s\n", t.Key, newVer, shortenHome(path))
 	}
+	return 0
+}
+
+// ---------- changelog ----------
+
+func runChangelog(args []string) int {
+	fs := flag.NewFlagSet("changelog", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	versions := changelogVersionLimit
+	fs.IntVar(&versions, "versions", changelogVersionLimit, "显示几个版本")
+	if err := fs.Parse(reorderArgs(args, map[string]bool{"versions": true})); err != nil {
+		fmt.Fprintln(os.Stderr, "参数不对: "+err.Error())
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(os.Stderr, "用法: hmck changelog <tool> [--versions N]\n可用: %s\n", keysText())
+		return 2
+	}
+	t, ok := toolByKey(fs.Arg(0))
+	if !ok {
+		fmt.Fprintf(os.Stderr, "不认识这个工具: %s\n可用: %s\n", fs.Arg(0), keysText())
+		return 2
+	}
+
+	current := ""
+	switch {
+	case t.Self:
+		current = version
+	default:
+		if p, found := findTool(t); found {
+			current = installedVersion(p)
+		}
+	}
+
+	entries, err := fetchChangelog(t.Repo, versions)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", t.Key, err)
+		return 1
+	}
+	fmt.Print(formatChangelogText(t.Key, entries, current))
 	return 0
 }
 

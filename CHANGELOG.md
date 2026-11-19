@@ -2,6 +2,20 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.9.0] - 2026-11-19
+
+### 新增
+
+- 列表里每个工具左边都摆上它自己的招牌（kube-token 六边形 + K、npm-token 方框 + N、hmck 方框 + ↑），和各自仓库的 `docs/logo.svg` 同一套几何；自定义工具用同款方框放名字首字母
+- 卡片第三行显示仓库和最近一版的第一条说明：启动时顺手抓回各仓库的 `CHANGELOG.md`，抓不到就静默显示仓库名，不影响列表
+- 按 `g` 看选中工具的更新日志：最近 5 个版本的小节和条目，标出「当前 / 最新」，`↑↓` 滚动、`pgup/pgdn` 翻页、`r` 重新拉取、`esc` 返回
+- `hmck changelog <tool> [--versions N]`：命令行里看同样的内容，适合脚本和 agent
+- 更新日志优先读仓库的 `CHANGELOG.md`，没有就退到 GitHub release notes；带 `GH_TOKEN` / `GITHUB_TOKEN` 时自动附上，减少 API 限流
+
+### 变更
+
+- 卡片从两行变成三行，高度和招牌对齐；路径、更新时间、说明的排版规则不变
+
 ## [0.8.0] - 2026-11-18
 
 ### 新增

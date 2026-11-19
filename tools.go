@@ -77,6 +77,32 @@ var registry = []tool{
 	},
 }
 
+// toolMarks 是每个工具在终端里的招牌，和各自仓库 docs/logo.svg 同一套几何：
+// hmck 方框 + 向上箭头、kube-token 六边形 + K、npm-token 方框 + N。
+// 三行、五格宽，行高对齐卡片，不依赖图片或字体。
+var toolMarks = map[string][]string{
+	"hmck":       {"╭───╮", "│ ↑ │", "╰───╯"},
+	"kube-token": {"╱───╲", "│ K │", "╲───╱"},
+	"npm-token":  {"┌───┐", "│ N │", "└───┘"},
+}
+
+// toolLogo 取工具的招牌；自定义工具用同款方框放名字首字母
+func toolLogo(t tool) []string {
+	if mark, ok := toolMarks[strings.ToLower(t.Key)]; ok {
+		return mark
+	}
+	ch := "*"
+	key := strings.TrimSpace(t.Key)
+	if key != "" {
+		r := []rune(strings.ToUpper(key))[0]
+		// 中文等宽字符会撑破五格宽的方框，只有 ASCII 字母数字才放进去
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			ch = string(r)
+		}
+	}
+	return []string{"┌───┐", "│ " + ch + " │", "└───┘"}
+}
+
 // allTools 是内置 + 本机配置里的自定义工具；key 冲突时内置优先
 func allTools() ([]tool, error) {
 	out := append([]tool(nil), registry...)

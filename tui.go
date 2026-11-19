@@ -40,6 +40,7 @@ const (
 	list tuiState = iota
 	working
 	result
+	notes
 )
 
 type resultLine struct {
@@ -74,6 +75,28 @@ type tuiModel struct {
 	updCh       chan tea.Msg
 	updGen      int
 	batchAction string // “更新”或“预下载”
+
+	chg  map[string]changelogState // 更新日志缓存：tool key -> 最近的几个版本
+	note notesView                 // 正在看的更新日志页
+}
+
+// changelogState 是一个工具更新日志的缓存
+type changelogState struct {
+	entries []changeEntry
+	err     string
+	at      time.Time
+}
+
+// notesView 是更新日志页的状态
+type notesView struct {
+	tool    tool
+	current string // 已装版本
+	latest  string // 最新版本
+	entries []changeEntry
+	err     string
+	loading bool
+	scroll  int
+	gen     int
 }
 
 type localDoneMsg struct {
@@ -126,6 +149,15 @@ type downloadDoneMsg struct {
 	results []downloadResult
 }
 
+// changelogMsg 是更新日志取回来的结果；prefetch 为 true 时只填列表卡片上的预览
+type changelogMsg struct {
+	key      string
+	entries  []changeEntry
+	err      error
+	gen      int
+	prefetch bool
+}
+
 func newTUIModel() tuiModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -135,6 +167,7 @@ func newTUIModel() tuiModel {
 		state: list, spin: sp, cfg: cfg,
 		staged:  map[string]string{},
 		pending: map[string]bool{},
+		chg:     map[string]changelogState{},
 	}
 	if err != nil {
 		m.cfgErr = err.Error()
@@ -153,7 +186,29 @@ func newTUIModel() tuiModel {
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, localInspectCmd(m.toolList()))
+	cmds := []tea.Cmd{m.spin.Tick, localInspectCmd(m.toolList())}
+	// 顺手把每个工具的更新日志抓回来，卡片第三行能预览最近改了什么
+	if c := m.prefetchChangelogs(); c != nil {
+		cmds = append(cmds, c)
+	}
+	return tea.Batch(cmds...)
+}
+
+// prefetchChangelogs 并发抓所有工具的更新日志，只用来填卡片预览，失败静默
+func (m tuiModel) prefetchChangelogs() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, t := range m.toolList() {
+		cmds = append(cmds, changelogCmd(t, changelogVersionLimit, 0, true))
+	}
+	return tea.Batch(cmds...)
+}
+
+// changelogCmd 拉一个工具的更新日志；prefetch 时只用来填列表预览
+func changelogCmd(t tool, limit, gen int, prefetch bool) tea.Cmd {
+	return func() tea.Msg {
+		entries, err := fetchChangelog(t.Repo, limit)
+		return changelogMsg{key: t.Key, entries: entries, err: err, gen: gen, prefetch: prefetch}
+	}
 }
 
 func (m tuiModel) toolList() []tool {
@@ -416,6 +471,26 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resultLines = append(m.resultLines, resultLine{text: fmt.Sprintf("%s %s 已下载，按 U 安装", r.key, r.ver), ok: true})
 		}
 
+	case changelogMsg:
+		errText := ""
+		if msg.err != nil {
+			errText = msg.err.Error()
+		}
+		if len(msg.entries) > 0 {
+			m.chg[msg.key] = changelogState{entries: msg.entries, at: time.Now()}
+		}
+		if msg.prefetch {
+			return m, nil
+		}
+		if m.state != notes || msg.key != m.note.tool.Key || msg.gen != m.note.gen {
+			return m, nil // 用户已经翻了别的工具，或又按了一次 r
+		}
+		m.note.loading = false
+		m.note.err = errText
+		if msg.err == nil {
+			m.note.entries = msg.entries
+		}
+
 	case execDoneMsg:
 		if msg.err != nil {
 			m.state = result
@@ -519,6 +594,11 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.saveCfg()
+		case "g":
+			if !m.localReady || len(m.states) == 0 {
+				return m, nil
+			}
+			return m.startNotes()
 		case "s":
 			m.state = working
 			m.workText = "正在安装 agent skill…"
@@ -537,6 +617,32 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.state = list
 		return m, nil
+
+	case notes:
+		switch k.String() {
+		case "up", "k":
+			m.note.scroll--
+		case "down", "j":
+			m.note.scroll++
+		case "pgup", "b":
+			m.note.scroll -= m.notesHeight()
+		case "pgdown", "f", " ":
+			m.note.scroll += m.notesHeight()
+		case "home":
+			m.note.scroll = 0
+		case "end":
+			m.note.scroll = m.notesMaxScroll()
+		case "r":
+			return m.reloadNotes()
+		case "enter", "esc":
+			m.state = list
+			m.note = notesView{}
+			return m, nil
+		case "q":
+			return m, tea.Quit
+		}
+		m.note.scroll = clampInt(m.note.scroll, 0, m.notesMaxScroll())
+		return m, nil
 	}
 	return m, nil
 }
@@ -547,7 +653,11 @@ func (m tuiModel) refresh() (tea.Model, tea.Cmd) {
 	m.checkedAt = time.Time{}
 	m.chkGen++ // 丢掉上一轮还没回来的结果
 	m.pending = map[string]bool{}
-	return m, tea.Batch(m.spin.Tick, localInspectCmd(m.toolList()))
+	cmds := []tea.Cmd{m.spin.Tick, localInspectCmd(m.toolList())}
+	if c := m.prefetchChangelogs(); c != nil {
+		cmds = append(cmds, c) // 更新日志也一起重抓
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // startLatestCheck 把本地已就绪的工具并发问一遍 GitHub
@@ -575,6 +685,9 @@ func (m tuiModel) startLatestCheck() (tea.Model, tea.Cmd) {
 func (m tuiModel) animating() bool {
 	if m.state == working {
 		return true
+	}
+	if m.state == notes {
+		return m.note.loading
 	}
 	return m.state == list && (!m.localReady || len(m.pending) > 0)
 }
@@ -649,6 +762,32 @@ func (m tuiModel) startAutoDownload() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.spin.Tick, downloadAllCmd(targets, ch, gen), waitUpd(ch, gen))
 }
 
+// ---------- 更新日志 ----------
+
+func (m tuiModel) startNotes() (tea.Model, tea.Cmd) {
+	st := m.states[m.cursor]
+	m.state = notes
+	m.note = notesView{tool: st.Tool, current: st.Installed, latest: st.Latest}
+	if c, ok := m.chg[st.Tool.Key]; ok && len(c.entries) > 0 {
+		m.note.entries = c.entries
+		return m, nil
+	}
+	return m.loadNotes()
+}
+
+func (m tuiModel) loadNotes() (tea.Model, tea.Cmd) {
+	m.note.loading = true
+	m.note.err = ""
+	m.note.scroll = 0
+	m.note.gen++
+	return m, tea.Batch(m.spin.Tick, changelogCmd(m.note.tool, changelogVersionLimit, m.note.gen, false))
+}
+
+func (m tuiModel) reloadNotes() (tea.Model, tea.Cmd) {
+	delete(m.chg, m.note.tool.Key)
+	return m.loadNotes()
+}
+
 func (m tuiModel) hasBehind() bool {
 	for _, st := range m.states {
 		if st.Behind() {
@@ -686,6 +825,8 @@ func (m tuiModel) View() string {
 		body = m.viewWorking()
 	case result:
 		body = m.viewResult()
+	case notes:
+		body = m.viewNotes()
 	}
 	return "\n" + body + "\n"
 }
@@ -763,7 +904,8 @@ func (m tuiModel) viewList() string {
 		}
 	}
 	b.WriteString("\n")
-	b.WriteString(m.viewHints("↑↓", "选择", "enter", "启动/安装", "u", "升级", "U", "全部更新", "s", "装 skill", "r", "重新检查", "q", "退出"))
+	b.WriteString(m.viewHints("↑↓", "选择", "enter", "启动/安装", "u", "升级", "U", "全部更新",
+		"g", "更新日志", "s", "装 skill", "r", "重新检查", "q", "退出"))
 	return b.String()
 }
 
@@ -871,10 +1013,18 @@ func (m tuiModel) versionCell(st toolState) string {
 	}
 }
 
-// renderCard 一行主信息（名称 · 版本 · 路径），一行说明；
+// renderCard 左边是这个工具的招牌，右边三行：
+// 名称 · 版本 · 上次更新时间 / 作用 · 路径 / 仓库 · 最近一版改了什么。
 // 路径贴右边，版本那几列不会因为路径长短而跑位
 func (m tuiModel) renderCard(st toolState, selected bool, cols cardCols) string {
-	w := m.contentWidth()
+	logo := toolLogo(st.Tool)
+	gutter := lipgloss.Width(logo[0]) + 2
+	// 卡片自己占掉左边框和缩进 2 列，招牌再占 gutter 列
+	w := m.contentWidth() - 2 - gutter
+	if w < 30 {
+		w = 30
+	}
+
 	nameStyle := styleNameOff
 	if selected {
 		nameStyle = styleNameOn
@@ -938,7 +1088,29 @@ func (m tuiModel) renderCard(st toolState, selected bool, cols cardCols) string 
 			stylePath.Render(p)
 	}
 
-	body := head + "\n" + line2
+	// 第三行：仓库 + 最近一版的说明（启动时顺手抓回来的），高度正好和招牌齐平
+	line3 := stylePath.Render(st.Tool.Repo)
+	if c, ok := m.chg[st.Tool.Key]; ok && len(c.entries) > 0 {
+		if s := c.entries[0].summary(); s != "" {
+			note := "v" + c.entries[0].Version + "  " + s
+			if avail := w - lipgloss.Width(st.Tool.Repo) - 5; avail >= 12 {
+				line3 += styles.Dim.Render("  ·  " + theme.Truncate(note, avail))
+			}
+		}
+	}
+
+	lines := []string{head, line2, line3}
+	var b strings.Builder
+	for i, l := range lines {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(styles.Accent.Render(logo[i]))
+		b.WriteString("  ")
+		b.WriteString(l)
+	}
+
+	body := b.String()
 	if selected {
 		return styleCardOn.Render(body)
 	}
@@ -981,6 +1153,118 @@ func (m tuiModel) viewResult() string {
 	b.WriteString("\n")
 	b.WriteString(styles.Hints("任意键", "返回"))
 	return b.String()
+}
+
+// viewNotes 是更新日志页：左边是所选工具的招牌，右边是版本号和状态
+func (m tuiModel) viewNotes() string {
+	var b strings.Builder
+	logo := toolLogo(m.note.tool)
+
+	sub := ""
+	switch {
+	case m.note.current != "" && m.note.latest != "":
+		sub = styles.Dim.Render("当前 " + m.note.current + " · 最新 " + m.note.latest)
+	case m.note.current != "":
+		sub = styles.Dim.Render("当前 " + m.note.current)
+	case m.note.latest != "":
+		sub = styles.Dim.Render("最新 " + m.note.latest + " · 还没安装")
+	default:
+		sub = styles.Dim.Render("还没安装")
+	}
+	head := []string{
+		styles.Title.Render(m.note.tool.Key) + styles.Dim.Render("  更新日志"),
+		sub,
+		styles.Dim.Render(m.note.tool.Repo),
+	}
+	for i, l := range logo {
+		b.WriteString(styles.Accent.Render(l) + "  " + head[i] + "\n")
+	}
+	b.WriteString("\n")
+
+	lines := m.notesLines(m.contentWidth())
+	start := clampInt(m.note.scroll, 0, max(len(lines)-m.notesHeight(), 0))
+	end := min(start+m.notesHeight(), len(lines))
+	for _, l := range lines[start:end] {
+		b.WriteString(l + "\n")
+	}
+	// 内容不满一屏时补空行，底部提示不会跟着跳
+	for i := end - start; i < m.notesHeight(); i++ {
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(m.viewHints("↑↓", "滚动", "pgup/pgdn", "翻页", "r", "刷新", "esc", "返回"))
+	return b.String()
+}
+
+// notesHeight 是日志正文能占几行：留出三行招牌、空行和底部提示
+func (m tuiModel) notesHeight() int {
+	return max(m.height-7, 3)
+}
+
+// notesMaxScroll 是最多能往下滚几行
+func (m tuiModel) notesMaxScroll() int {
+	return max(len(m.notesLines(m.contentWidth()))-m.notesHeight(), 0)
+}
+
+// notesLines 把版本列表排成一行行文字；滚动按这个算
+func (m tuiModel) notesLines(w int) []string {
+	if m.note.loading {
+		return []string{"  " + m.spin.View() + "  " + styles.Dim.Render("正在读取更新日志…")}
+	}
+	if m.note.err != "" {
+		return []string{
+			"  " + styles.Warn.Render(theme.Truncate("没读到更新日志: "+m.note.err, w-2)),
+			"  " + styles.Dim.Render("按 r 重试，或看 "+m.note.tool.Repo+" 的 Releases"),
+		}
+	}
+	if len(m.note.entries) == 0 {
+		return []string{"  " + styles.Dim.Render("这个工具还没写更新日志")}
+	}
+
+	var lines []string
+	for i, e := range m.note.entries {
+		head := "  " + styles.Accent.Render("v"+e.Version)
+		if e.Date != "" {
+			head += "  " + styles.Dim.Render(e.Date)
+		}
+		switch {
+		case i == 0 && e.Version == m.note.current:
+			head += "  " + styles.Good.Render("当前 · 最新")
+		case i == 0:
+			head += "  " + styles.Warn.Render("最新")
+		case e.Version == m.note.current:
+			head += "  " + styles.Good.Render("当前")
+		}
+		lines = append(lines, head)
+		for _, s := range e.Sections {
+			if s.Title != "" {
+				lines = append(lines, "    "+styles.Dim.Render(s.Title))
+			}
+			for _, it := range s.Items {
+				lines = append(lines, wrapBullet(it, w-8)...)
+			}
+		}
+		lines = append(lines, "")
+	}
+	return lines
+}
+
+// wrapBullet 把一条说明折成多行，续行缩进对齐在破折号后面
+func wrapBullet(item string, width int) []string {
+	if width < 12 {
+		width = 12
+	}
+	parts := strings.Split(lipgloss.NewStyle().Width(width).Render(item), "\n")
+	out := make([]string, 0, len(parts))
+	for i, p := range parts {
+		if i == 0 {
+			out = append(out, "      - "+p)
+		} else {
+			out = append(out, "        "+p)
+		}
+	}
+	return out
 }
 
 func (m tuiModel) contentWidth() int {

@@ -6,6 +6,20 @@ import (
 	"strings"
 )
 
+// clampInt 把 v 收在 [lo, hi] 里
+func clampInt(v, lo, hi int) int {
+	if hi < lo {
+		hi = lo
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
 func isTTY(f *os.File) bool {
 	st, err := f.Stat()
 	if err != nil {

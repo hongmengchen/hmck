@@ -469,6 +469,7 @@ func TestListViewShowsLogo(t *testing.T) {
 }
 
 func TestLatestResultsArriveOneByOne(t *testing.T) {
+	isolateConfig(t) // 本机的自动安装开关不能影响这里
 	m := newTUIModel()
 	m.state = list
 	m.localReady = true
