@@ -14,7 +14,7 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.10.0"
+var version = "0.10.1"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -119,6 +119,8 @@ type listItem struct {
 	UpdatedAt  string `json:"updated_at,omitempty"`
 	Custom     bool   `json:"custom,omitempty"`
 	Error      string `json:"error,omitempty"`
+	InUse      string `json:"in_use,omitempty"`  // 本机上实际能跑的那份（hmck 没装时是 PATH 上别人装的）
+	Foreign    bool   `json:"foreign,omitempty"` // in_use 不归 hmck 管（brew / apt 装的）
 }
 
 func runList(args []string) int {
@@ -153,6 +155,9 @@ func runList(args []string) int {
 	rows := make([]row, 0, len(states))
 	for _, st := range states {
 		installed, latest := st.Installed, st.Latest
+		if installed == "" && st.ForeignVer != "" {
+			installed = st.ForeignVer + "（PATH）" // 本机能用，只是不归 hmck 管
+		}
 		if installed == "" {
 			installed = "—"
 		}
@@ -194,11 +199,16 @@ func toListItem(st toolState) listItem {
 	if !st.UpdatedAt.IsZero() {
 		updated = st.UpdatedAt.Format(time.RFC3339)
 	}
+	inUse, foreign := st.Path, false
+	if inUse == "" && len(st.Foreign) > 0 {
+		inUse, foreign = st.Foreign[0], true
+	}
 	return listItem{
 		Key: st.Tool.Key, Name: st.Tool.Name,
 		Installed: st.Installed, Latest: st.Latest, Path: shortenHome(st.Path),
 		Status: label, Upgradable: st.Behind(), UpdatedAt: updated,
 		Custom: st.Tool.Custom, Error: st.CheckErr,
+		InUse: shortenHome(inUse), Foreign: foreign,
 	}
 }
 
@@ -325,8 +335,8 @@ func runRun(args []string) int {
 		fmt.Fprintf(os.Stderr, "不认识这个工具: %s\n可用: %s\n", args[0], keysText())
 		return 2
 	}
-	path, found := findTool(t)
-	if !found {
+	path := toolBinary(t)
+	if path == "" {
 		fmt.Fprintf(os.Stderr, "%s 还没装。先运行:\n  hmck install %s\n", t.Key, t.Key)
 		return 1
 	}
@@ -413,6 +423,14 @@ func runUpgrade(args []string) int {
 	for _, t := range targets {
 		st := byKey[t.Key]
 		switch {
+		case st.Missing() && len(st.Foreign) > 0:
+			// 本机在用的那份不归 hmck 管，别去动它，也别另装一份
+			ver := st.ForeignVer
+			if ver == "" {
+				ver = "版本没读出来"
+			}
+			fmt.Printf("%s: 用的是 PATH 上 %s（%s），不归 hmck 升级，跳过\n",
+				t.Key, shortenHome(st.Foreign[0]), ver)
 		case st.Missing():
 			fmt.Printf("%s: 未安装，跳过（要装请用 hmck install %s）\n", t.Key, t.Key)
 		case st.Latest == "":
@@ -441,6 +459,18 @@ func doInstall(st toolState, force bool) int {
 	latest := st.Latest
 	if latest == "" {
 		latest = "最新版"
+	}
+	// hmck 第一次装某个工具、PATH 上却已经有别人一份时（brew 的 glab），
+	// 先把「装完哪份在用」说清楚：原来那份不删不改，多出来的这份在 hmck 目录里
+	if st.Installed == "" && len(st.Foreign) > 0 {
+		ver := st.ForeignVer
+		if ver == "" {
+			ver = "版本没读出来"
+		}
+		if note, _ := shadowNote(installTarget(t), st.Foreign[0]); note != "" {
+			fmt.Printf("注意：PATH 上已经有一份 %s（%s），%s\n",
+				shortenHome(st.Foreign[0]), ver, note)
+		}
 	}
 	fmt.Printf("%s: %s → %s，下载中…\n", t.Key, from, latest)
 

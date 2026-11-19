@@ -254,7 +254,7 @@ func toolInfoFor(st toolState) toolInfo {
 // loginInfo 是 glab 这类工具的头一条：登的是哪台主机、谁、token 从哪来
 func loginInfo(st toolState) (string, string, []infoField) {
 	if len(st.Logins) == 0 {
-		if st.Missing() {
+		if st.Missing() && len(st.Foreign) == 0 {
 			return "○ 还没装 · 装好以后在终端里跑 glab auth login", "missing", nil
 		}
 		return "! 读不出登录状态", "warn", nil
@@ -347,7 +347,7 @@ func installFields(st toolState) []infoField {
 	case st.Path != "":
 		out = append(out, infoField{Key: "位置", Value: shortenHome(st.Path)})
 	case len(st.Foreign) > 0:
-		out = append(out, infoField{Key: "位置", Value: "没被 hmck 接管（用下面这一份）", Kind: "warn"})
+		out = append(out, infoField{Key: "位置", Value: "没被 hmck 接管", Kind: "warn"})
 	default:
 		out = append(out, infoField{Key: "位置", Value: "—"})
 	}
@@ -359,7 +359,12 @@ func installFields(st toolState) []infoField {
 		for _, p := range st.Foreign {
 			paths = append(paths, shortenHome(p))
 		}
-		out = append(out, infoField{Key: "其他副本", Value: strings.Join(paths, "\n")})
+		// 没接管时，PATH 上这唯一一份就是正在用的，不能叫「其他副本」
+		label := "其他副本"
+		if st.Path == "" {
+			label = "用的这份"
+		}
+		out = append(out, infoField{Key: label, Value: strings.Join(paths, "\n")})
 	}
 	if st.CheckErr != "" {
 		out = append(out, infoField{Key: "检查", Value: st.CheckErr, Kind: "warn"})

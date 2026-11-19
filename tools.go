@@ -105,32 +105,13 @@ var registry = []tool{
 	},
 }
 
-// toolMarks 是每个工具在终端里的招牌，和各自仓库 docs/logo.svg 同一套几何：
-// hmck 方框 + 向上箭头、kube-token 六边形 + K、npm-token 方框 + N、
-// glab 的狸猫耳朵 + G。
-// 三行、五格宽，行高对齐卡片，不依赖图片或字体。
+// toolMarks 是 SVG 画不出来时的退路：三行、五格宽的手画方框。
+// 平时用的招牌在 logo.go 里，由各自仓库的 docs/logos/*.svg 渲染出来
 var toolMarks = map[string][]string{
 	"hmck":       {"╭───╮", "│ ↑ │", "╰───╯"},
 	"kube-token": {"╱───╲", "│ K │", "╲───╱"},
 	"npm-token":  {"┌───┐", "│ N │", "└───┘"},
 	"glab":       {"╱╲_╱╲", "│ G │", "╲___╱"},
-}
-
-// toolLogo 取工具的招牌；自定义工具用同款方框放名字首字母
-func toolLogo(t tool) []string {
-	if mark, ok := toolMarks[strings.ToLower(t.Key)]; ok {
-		return mark
-	}
-	ch := "*"
-	key := strings.TrimSpace(t.Key)
-	if key != "" {
-		r := []rune(strings.ToUpper(key))[0]
-		// 中文等宽字符会撑破五格宽的方框，只有 ASCII 字母数字才放进去
-		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			ch = string(r)
-		}
-	}
-	return []string{"┌───┐", "│ " + ch + " │", "└───┘"}
 }
 
 // allTools 是内置 + 本机配置里的自定义工具；key 冲突时内置优先
@@ -277,6 +258,52 @@ func writable(dir string) bool {
 	return true
 }
 
+// installTarget 是 hmck 会把这份工具装到哪：和 hmck 同一个目录。
+// 不管现在装没装都能算出来，确认页和提示要先把它说给用户听
+func installTarget(t tool) string {
+	dir, err := installDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, binaryName(t, runtime.GOOS))
+}
+
+// pathRank 是一个目录在 PATH 里排第几；不在 PATH 里返回 -1
+func pathRank(dir string) int {
+	dir = filepath.Clean(dir)
+	for i, d := range filepath.SplitList(os.Getenv("PATH")) {
+		if d == "" {
+			continue
+		}
+		if filepath.Clean(d) == dir {
+			return i
+		}
+	}
+	return -1
+}
+
+// shadowNote 按 PATH 顺序说清楚：hmck 装一份以后，终端里敲同一个命令会用哪份。
+// glab 这类工具 brew 里常有一份，装到前面的目录就会把用户在用的那份顶掉，
+// 所以这里不猜，直接按 PATH 排位算
+func shadowNote(target, foreign string) (string, string) {
+	if target == "" || foreign == "" {
+		return "", ""
+	}
+	targetDir, foreignDir := filepath.Dir(target), filepath.Dir(foreign)
+	switch {
+	case filepath.Clean(targetDir) == filepath.Clean(foreignDir):
+		return "和原来那份在同一个目录，装的位置会完全一样", "warn"
+	case pathRank(targetDir) < 0:
+		return shortenHome(targetDir) + " 不在 PATH 里，装完不影响终端里的命令", ""
+	case pathRank(targetDir) < pathRank(foreignDir) || pathRank(foreignDir) < 0:
+		return "装完终端里会先用 hmck 装的这份（" + shortenHome(targetDir) +
+			" 排在 " + shortenHome(foreignDir) + " 前面）", "warn"
+	default:
+		return "装完终端里的命令还是原来那份（" + shortenHome(targetDir) +
+			" 排在 " + shortenHome(foreignDir) + " 后面）", "ok"
+	}
+}
+
 // managedPath 是 hmck 自己装出来的那一份：和 hmck 在同一个目录
 func managedPath(t tool) (string, bool) {
 	dir, err := installDir()
@@ -299,6 +326,19 @@ func findTool(t tool) (string, bool) {
 		}
 	}
 	return managedPath(t)
+}
+
+// toolBinary 是本机上能直接跑的那份：hmck 自己装的那份优先，没有就退到 PATH 上
+// 别人装的（brew / apt 的 glab）。都没有才返回空。启动和分析都用它，
+// 别因为 hmck 没装过就假装本机没有这个工具
+func toolBinary(t tool) string {
+	if p, ok := findTool(t); ok {
+		return p
+	}
+	if copies := foreignCopies(t, ""); len(copies) > 0 {
+		return copies[0]
+	}
+	return ""
 }
 
 // foreignCopies 列出 PATH 上其他位置的同名程序（比如 brew 装的 glab）。
@@ -391,6 +431,12 @@ func (s toolState) Behind() bool {
 
 func (s toolState) Status() (string, string) {
 	switch {
+	case s.Missing() && len(s.Foreign) > 0:
+		// 本机上其实有一份能用的（brew 的 glab），只是不归 hmck 管
+		if s.ForeignVer != "" {
+			return "用 PATH 上的 " + s.ForeignVer, "warn"
+		}
+		return "用 PATH 上的那份", "warn"
 	case s.Missing():
 		return "未安装", "missing"
 	case s.CheckErr != "":

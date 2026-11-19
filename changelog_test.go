@@ -212,9 +212,10 @@ func TestListViewShowsToolLogos(t *testing.T) {
 	}
 
 	got := plainText(m.viewList())
-	for _, want := range []string{"│ K │", "│ N │", "│ ↑ │", "│ M │"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("列表里缺少招牌 %q:\n%s", want, got)
+	for _, key := range []string{"kube-token", "npm-token", "hmck"} {
+		logo := toolLogo(tool{Key: key})
+		if len(logo) == 0 || !strings.Contains(got, plainText(logo[0])) {
+			t.Errorf("列表里缺少 %s 的招牌:\n%s", key, got)
 		}
 	}
 	if got := plainText(strings.Join(toolLogo(tool{Key: "中文工具"}), "")); !strings.Contains(got, "│ * │") {
@@ -262,7 +263,8 @@ func TestNotesPageShowsCachedChangelog(t *testing.T) {
 		t.Error("缓存里已经有日志，不该再发请求")
 	}
 	view := plainText(got.viewNotes())
-	for _, want := range []string{"kube-token  更新日志", "│ K │", "当前 0.7.0 · 最新 0.8.0", "v0.8.0", "Vault 登录缓存"} {
+	logoRow := plainText(toolLogo(tool{Key: "kube-token"})[0])
+	for _, want := range []string{"kube-token  更新日志", logoRow, "当前 0.7.0 · 最新 0.8.0", "v0.8.0", "Vault 登录缓存"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("日志页缺少 %q:\n%s", want, view)
 		}

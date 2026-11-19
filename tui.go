@@ -372,8 +372,10 @@ func waitUpd(ch chan tea.Msg, gen int) tea.Cmd {
 	}
 }
 
-func launchCmd(st toolState) tea.Cmd {
-	cmd := exec.Command(st.Path)
+// launchCmd 启动一份已经在本机上的工具。path 由调用方决定：优先 hmck 装的那份，
+// 没有就用 PATH 上别人装的那份（brew 的 glab），不会顺手装个新的
+func launchCmd(t tool, path string) tea.Cmd {
+	cmd := exec.Command(path)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return execDoneMsg{err: err}
 	})
@@ -615,13 +617,15 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// 选到自己时不启动自己，只走升级/已是最新
 				return m.startInstall(st)
 			}
-			if st.Missing() || st.Path == "" {
-				return m.startInstall(st)
+			// 本机上有哪份就启动哪份：hmck 装的那份优先，其次才是 PATH 上
+			// 别人装的（brew 的 glab）。启动永远不会顺手装一份新的
+			if bin := toolCopy(st); bin != "" {
+				return m, launchCmd(st.Tool, bin)
 			}
-			return m, launchCmd(st)
+			return m.startInstall(st)
 		case "u":
 			if m.localReady && len(m.states) > 0 {
-				return m.startInstall(m.states[m.cursor])
+				return m.upgradeOne(m.states[m.cursor])
 			}
 		case "U":
 			if !m.localReady {
@@ -737,7 +741,7 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "g":
 			return m.startNotesFor(m.info.tool)
 		case "u":
-			return m.startInstall(m.stateOf(m.info.tool.Key))
+			return m.upgradeOne(m.stateOf(m.info.tool.Key))
 		case "d":
 			return m.startUninstall(m.stateOf(m.info.tool.Key))
 		case "r":
@@ -804,8 +808,32 @@ func (m tuiModel) startInstall(st toolState) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.state = working
-	m.workText = "正在下载并替换 " + st.Tool.Key + "…"
+	if st.Installed == "" {
+		m.workText = "正在下载并安装 " + st.Tool.Key + "…"
+	} else {
+		m.workText = "正在下载并替换 " + st.Tool.Key + "…"
+	}
 	return m, tea.Batch(m.spin.Tick, installCmd(st))
+}
+
+// upgradeOne 是 u 键。hmck 只查看 PATH 上已有的那份的工具（brew 的 glab），
+// 按下升级也只说清楚「用的是哪份」，不再往 hmck 目录里另装一份——
+// 多出来的副本会排在 PATH 前面，把用户和 agent 一直在用的那份顶掉
+func (m tuiModel) upgradeOne(st toolState) (tea.Model, tea.Cmd) {
+	if st.Tool.OwnDir && st.Installed == "" && len(st.Foreign) > 0 {
+		ver := st.ForeignVer
+		if ver != "" {
+			ver = "（v" + ver + "）"
+		}
+		m.state = result
+		m.resultLines = []resultLine{
+			{text: st.Tool.Key + " 用的是 PATH 上 " + shortenHome(st.Foreign[0]) + ver, ok: true},
+			{text: "这一份归 brew / 系统管，hmck 只查看和启动它，不会另装一份", ok: true},
+			{text: "要换版本用它自己的包管理器；确实要 hmck 的副本才用 hmck install " + st.Tool.Key, ok: true},
+		}
+		return m, nil
+	}
+	return m.startInstall(st)
 }
 
 // startUpgradeAll 一键更新：把所有 Behind 的工具按顺序更新一遍
@@ -982,18 +1010,12 @@ func (m tuiModel) View() string {
 	return "\n" + body + "\n"
 }
 
-// logoLines 是终端里的招牌，和 docs/logo.svg 同一套几何：一个方框加向上的箭头
-var logoLines = []string{
-	"╭───╮",
-	"│ ↑ │",
-	"╰───╯",
-}
-
-// withLogo 把 logo 摆在左边，右边逐行接上文字
+// withLogo 把 hmck 的招牌（docs/logos/hmck.svg 渲染出来的）摆在左边，右边逐行接上文字
 func (m tuiModel) withLogo(lines ...string) string {
+	logo := toolLogo(tool{Key: "hmck"})
 	var b strings.Builder
-	for i, l := range logoLines {
-		b.WriteString(styles.Accent.Render(l))
+	for i, l := range logo {
+		b.WriteString(l)
 		if i < len(lines) && lines[i] != "" {
 			b.WriteString("  " + lines[i])
 		}
@@ -1012,7 +1034,8 @@ func (m tuiModel) viewList() string {
 		if st.Behind() {
 			behind++
 		}
-		if st.Missing() {
+		// PATH 上已经有一份的（brew 的 glab）不算「未安装」：本机明明能跑
+		if st.Missing() && len(st.Foreign) == 0 {
 			missing++
 		}
 	}
@@ -1127,6 +1150,12 @@ func (m tuiModel) statusIcon(st toolState) (string, lipgloss.Style) {
 	switch {
 	case st.Installed == "" && st.CheckErr != "":
 		return "!", styles.Bad // 这台机器上装不了
+	case st.Installed == "" && len(st.Foreign) > 0:
+		// 用的是 PATH 上别人装的那份：版本刚好也是最新给个 ✓，否则按「不归 hmck 管」处理
+		if st.ForeignVer != "" && st.Latest != "" && !isNewer(st.Latest, st.ForeignVer) {
+			return "✓", styles.Good
+		}
+		return "·", styles.Dim
 	case st.Installed == "":
 		return "○", styles.Warn
 	case st.CheckErr != "":
@@ -1206,8 +1235,9 @@ func (m tuiModel) renderCard(st toolState, selected bool, cols cardCols) string 
 	case st.Installed == "" && st.CheckErr != "":
 		tail, tailStyle = "  "+st.CheckErr, styles.Warn
 	case st.Installed == "" && len(st.Foreign) > 0:
-		// PATH 上已经有一份别人的（brew 装的 glab 之类）：hmck 不接管，只装自己那份
-		tail, tailStyle = "  ·  PATH 上已有一份，hmck 不接管；按 enter 装自己那份", styles.Dim
+		// PATH 上已经有一份别人的（brew 装的 glab 之类）：hmck 只查看和启动它，
+		// 不接管、不另装一份
+		tail, tailStyle = "  ·  PATH 上已有一份，hmck 只查看；按 enter 就用它", styles.Dim
 		tailShort = "  ·  PATH 上已有一份"
 	case st.Installed == "":
 		tail, tailStyle = "  ·  按 enter 安装到 "+shortenHome(m.installHint()), styles.Dim
@@ -1268,13 +1298,16 @@ func (m tuiModel) renderCard(st toolState, selected bool, cols cardCols) string 
 
 	lines := []string{head, line2, line3}
 	var b strings.Builder
-	for i, l := range lines {
+	for i, l := range logo {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(styles.Accent.Render(logo[i]))
-		b.WriteString("  ")
+		// 招牌比文字行多的时候，多出来的那几行只放招牌
 		b.WriteString(l)
+		if i < len(lines) {
+			b.WriteString("  ")
+			b.WriteString(lines[i])
+		}
 	}
 
 	body := b.String()
@@ -1348,7 +1381,11 @@ func (m tuiModel) viewNotes() string {
 		styles.Dim.Render(m.note.tool.Repo),
 	}
 	for i, l := range logo {
-		b.WriteString(styles.Accent.Render(l) + "  " + head[i] + "\n")
+		b.WriteString(l)
+		if i < len(head) {
+			b.WriteString("  " + head[i])
+		}
+		b.WriteString("\n")
 	}
 	b.WriteString("\n")
 
@@ -1382,7 +1419,11 @@ func (m tuiModel) viewInfo() string {
 	}
 	var b strings.Builder
 	for i, l := range toolLogo(st.Tool) {
-		b.WriteString(styles.Accent.Render(l) + "  " + head[i] + "\n")
+		b.WriteString(l)
+		if i < len(head) {
+			b.WriteString("  " + head[i])
+		}
+		b.WriteString("\n")
 	}
 	b.WriteString("\n")
 
@@ -1428,7 +1469,11 @@ func (m tuiModel) viewConfirm() string {
 	}
 	var b strings.Builder
 	for i, l := range toolLogo(st.Tool) {
-		b.WriteString(styles.Accent.Render(l) + "  " + head[i] + "\n")
+		b.WriteString(l)
+		if i < len(head) {
+			b.WriteString("  " + head[i])
+		}
+		b.WriteString("\n")
 	}
 	b.WriteString("\n")
 

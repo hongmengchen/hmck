@@ -2,6 +2,17 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.10.1] - 2026-11-19
+
+### 新增
+
+- TUI 里的招牌换成真图标：`docs/logos/*.svg`（glab 是 GitLab 官方 press kit 里的狸猫）编译进程序，运行时光栅化成 16×16 点阵、用盲文字符画出来，颜色取 SVG 里的原色——hmck 的深色方块加绿色箭头、kube-token 的六边形和蓝色菱形、npm-token 的方块和红点、GitLab 的橙红狸猫。终端颜色少的时候由 lipgloss 自己降级；自定义工具和读不出 SVG 的时候还是原来的方框加首字母
+
+### 变更
+
+- PATH 上已经有一份的工具（brew 装的 glab）不再提示「下载并替换」：回车就是用它启动，hmck 自己那份优先，没有也不另装第二个副本——两个 glab 并存会有一个排在 PATH 前面，把人和 agent 一直在用的那份顶掉
+- 对这类工具按 `u` 只说明它归谁管、该用谁升级，不再往 hmck 目录里装一份；卡片、信息页、`hmck list --json` 都把它标成正在用的那一份
+
 ## [0.10.0] - 2026-11-19
 
 ### 新增

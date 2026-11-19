@@ -446,7 +446,7 @@ func TestAnyKeyLeavesResult(t *testing.T) {
 	}
 }
 
-// 列表页左边有招牌，和 docs/logo.svg 是同一套方框 + 向上箭头
+// 列表页左边是 hmck 的招牌：docs/logos/hmck.svg 渲染成的盲文点阵
 func TestListViewShowsLogo(t *testing.T) {
 	m := newTUIModel()
 	m.width, m.height = 100, 40
@@ -458,12 +458,16 @@ func TestListViewShowsLogo(t *testing.T) {
 	}}
 
 	got := plainText(m.viewList())
-	for _, want := range []string{"╭───╮", "│ ↑ │", "╰───╯"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("列表页缺招牌 %q:\n%s", want, got)
+	logo := toolLogo(tool{Key: "hmck"})
+	if len(logo) != logoRowsN {
+		t.Fatalf("招牌应有 %d 行，got %d", logoRowsN, len(logo))
+	}
+	for _, row := range logo {
+		if !strings.Contains(got, plainText(row)) {
+			t.Errorf("列表页缺招牌那一行 %q:\n%s", plainText(row), got)
 		}
 	}
-	if first := strings.SplitN(got, "\n", 2)[0]; !strings.Contains(first, "╭───╮") || !strings.Contains(first, "hmck") {
+	if first := strings.SplitN(got, "\n", 2)[0]; !strings.Contains(first, plainText(logo[0])) || !strings.Contains(first, "hmck") {
 		t.Errorf("第一行应是招牌 + 标题，got %q", first)
 	}
 }
