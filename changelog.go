@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -47,22 +48,32 @@ var (
 	releasesListURL = func(repo string) string {
 		return "https://api.github.com/repos/" + repo + "/releases?per_page=20"
 	}
+
+	// GitLab 的仓库文件走 /-/raw/，release 列表走 projects/<path>/releases
+	gitlabChangelogRawURL = func(repo string) string {
+		return "https://gitlab.com/" + repo + "/-/raw/main/CHANGELOG.md"
+	}
+	gitlabReleasesListURL = func(repo string) string {
+		return "https://gitlab.com/api/v4/projects/" + url.PathEscape(repo) + "/releases?per_page=20"
+	}
 )
 
-// fetchChangelog 拿一个仓库最近的几个版本说明
-func fetchChangelog(repo string, limit int) ([]changeEntry, error) {
+// fetchChangelog 拿一个工具最近的几个版本说明；GitHub 和 GitLab 都能读
+func fetchChangelog(t tool, limit int) ([]changeEntry, error) {
+	repo := t.Repo
+	gitlab := t.releaseHost() == "gitlab"
 	if limit <= 0 {
 		limit = changelogVersionLimit
 	}
 	rawErr := error(nil)
-	if entries, err := changelogFromRepo(repo); err == nil && len(entries) > 0 {
+	if entries, err := changelogFromRepo(repo, gitlab); err == nil && len(entries) > 0 {
 		return trimEntries(entries, limit), nil
 	} else if err != nil {
 		rawErr = err
 	}
 
 	relErr := error(nil)
-	if entries, err := changelogFromReleases(repo); err == nil && len(entries) > 0 {
+	if entries, err := changelogFromReleases(repo, gitlab); err == nil && len(entries) > 0 {
 		return trimEntries(entries, limit), nil
 	} else if err != nil {
 		relErr = err
@@ -96,8 +107,12 @@ func githubAuth(req *http.Request) {
 	}
 }
 
-func changelogFromRepo(repo string) ([]changeEntry, error) {
-	req, err := http.NewRequest(http.MethodGet, changelogRawURL(repo), nil)
+func changelogFromRepo(repo string, gitlab bool) ([]changeEntry, error) {
+	pageURL := changelogRawURL(repo)
+	if gitlab {
+		pageURL = gitlabChangelogRawURL(repo)
+	}
+	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -121,9 +136,16 @@ func changelogFromRepo(repo string) ([]changeEntry, error) {
 	return parseChangelog(string(data)), nil
 }
 
-// changelogFromReleases 是兜底：仓库没有 CHANGELOG.md 时看 release notes
-func changelogFromReleases(repo string) ([]changeEntry, error) {
-	req, err := http.NewRequest(http.MethodGet, releasesListURL(repo), nil)
+// changelogFromReleases 是兜底：仓库没有 CHANGELOG.md 时看 release notes。
+// GitHub 和 GitLab 的字段名不一样（published_at/body 对 released_at/description），
+// 一份结构体两边都认
+func changelogFromReleases(repo string, gitlab bool) ([]changeEntry, error) {
+	listURL := releasesListURL(repo)
+	host := "GitHub"
+	if gitlab {
+		listURL, host = gitlabReleasesListURL(repo), "GitLab"
+	}
+	req, err := http.NewRequest(http.MethodGet, listURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -137,15 +159,17 @@ func changelogFromReleases(repo string) ([]changeEntry, error) {
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusForbidden, http.StatusTooManyRequests:
-		return nil, fmt.Errorf("GitHub API 限流了，稍后再试")
+		return nil, fmt.Errorf("%s API 限流了，稍后再试", host)
 	default:
 		return nil, fmt.Errorf("读 release 说明失败: %s", resp.Status)
 	}
 
 	var rels []struct {
 		TagName     string `json:"tag_name"`
-		PublishedAt string `json:"published_at"`
-		Body        string `json:"body"`
+		PublishedAt string `json:"published_at"` // GitHub
+		ReleasedAt  string `json:"released_at"`  // GitLab
+		Body        string `json:"body"`         // GitHub
+		Description string `json:"description"`  // GitLab
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&rels); err != nil {
 		return nil, err
@@ -157,10 +181,11 @@ func changelogFromReleases(repo string) ([]changeEntry, error) {
 			continue
 		}
 		date := ""
-		if len(r.PublishedAt) >= 10 {
-			date = r.PublishedAt[:10]
+		if at := firstNonEmpty(r.PublishedAt, r.ReleasedAt); len(at) >= 10 {
+			date = at[:10]
 		}
-		entries = append(entries, changeEntry{Version: ver, Date: date, Sections: sectionsFromMarkdown(r.Body)})
+		body := firstNonEmpty(r.Body, r.Description)
+		entries = append(entries, changeEntry{Version: ver, Date: date, Sections: sectionsFromMarkdown(body)})
 	}
 	return entries, nil
 }
@@ -174,7 +199,9 @@ func sectionsFromMarkdown(body string) []changeSection {
 		if trimmed == "" {
 			continue
 		}
-		if title, ok := sectionHeading(trimmed); ok {
+		// release notes 的标题级别不固定：glab 的说明整个包在 `## Changelog`
+		// 下面，写死 `###` 会把它当成一句普通说明，卡片上就显示成「## Changelog」
+		if title, ok := markdownHeading(trimmed); ok {
 			secs = append(secs, changeSection{Title: title})
 			continue
 		}
@@ -308,6 +335,23 @@ func sectionHeading(line string) (string, bool) {
 	return strings.TrimSpace(strings.TrimPrefix(line, "###")), true
 }
 
+// markdownHeading 认任意级别的标题（`# 变更`、`## Changelog`、`### 新增`）：
+// 井号后面必须有空格，免得把 `#123` 这种 issue 引用当成标题
+func markdownHeading(line string) (string, bool) {
+	if !strings.HasPrefix(line, "#") {
+		return "", false
+	}
+	rest := strings.TrimLeft(line, "#")
+	if rest == line || !strings.HasPrefix(rest, " ") {
+		return "", false
+	}
+	title := cleanMarkdown(strings.TrimSpace(rest))
+	if title == "" {
+		return "", false
+	}
+	return title, true
+}
+
 func bulletText(line string) (string, bool) {
 	s := strings.TrimLeft(line, " \t")
 	for _, p := range []string{"- ", "* ", "+ "} {
@@ -366,4 +410,14 @@ func formatChangelogText(key string, entries []changeEntry, current string) stri
 		}
 	}
 	return b.String()
+}
+
+// firstNonEmpty 取第一个非空值；GitHub / GitLab 的字段名不一样，两边都传进来
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }

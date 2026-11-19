@@ -14,7 +14,7 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.9.0"
+var version = "0.10.0"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -40,12 +40,16 @@ func run(args []string) int {
 		return runInstall(rest)
 	case "upgrade", "update":
 		return runUpgrade(rest)
+	case "info", "status":
+		return runInfo(rest)
 	case "changelog", "changes", "notes":
 		return runChangelog(rest)
 	case "add":
 		return runAdd(rest)
 	case "rm", "remove":
 		return runRemove(rest)
+	case "uninstall", "un":
+		return runUninstall(rest)
 	case "skill":
 		return runSkill(rest)
 	case "tui":
@@ -72,9 +76,11 @@ func usage(w io.Writer) {
   hmck run <tool> [参数…]  启动工具，参数原样传给它
   hmck install <tool>      安装最新版（--force 重装）
   hmck upgrade [<tool>]    升级；不带参数就升级所有可升级的工具（包括 hmck 自己）
+  hmck info <tool>         看这个工具装着没、装在哪、登录状态（--json）
   hmck changelog <tool>    看这个工具最近几个版本改了什么（--versions N，默认 5）
   hmck add <owner/repo>    把一个新工具加进本机配置，之后就能 install/upgrade
-  hmck rm <tool>           删掉自定义工具（内置的删不了）
+  hmck uninstall <tool>    卸载 hmck 装的那份（--keep-skill 保留 skill；hmck 自己也能卸）
+  hmck rm <tool>           删掉自定义工具的配置（内置的删不了）
   hmck skill               给 hmck 和已安装的工具装 agent skill
   hmck version
   hmck help
@@ -95,6 +101,8 @@ func usage(w io.Writer) {
   hmck run npm-token      # 命令行直接启动
   hmck upgrade            # 把 hmck 和所有工具升到最新
   hmck upgrade hmck       # 只升级 hmck 自己
+  hmck info glab          # 看 glab 登录到哪台主机、token 从哪来
+  hmck uninstall glab     # 只删 hmck 装的那份，PATH 上别人装的 glab 不动
 `)
 }
 
@@ -192,6 +200,69 @@ func toListItem(st toolState) listItem {
 		Status: label, Upgradable: st.Behind(), UpdatedAt: updated,
 		Custom: st.Tool.Custom, Error: st.CheckErr,
 	}
+}
+
+// ---------- info ----------
+
+func runInfo(args []string) int {
+	fs := flag.NewFlagSet("info", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var asJSON bool
+	fs.BoolVar(&asJSON, "json", false, "输出 JSON")
+	if err := fs.Parse(reorderFlags(args)); err != nil {
+		fmt.Fprintln(os.Stderr, "参数不对: "+err.Error())
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(os.Stderr, "用法: hmck info <tool> [--json]\n可用: %s\n", keysText())
+		return 2
+	}
+	t, ok := toolByKey(fs.Arg(0))
+	if !ok {
+		fmt.Fprintf(os.Stderr, "不认识这个工具: %s\n可用: %s\n", fs.Arg(0), keysText())
+		return 2
+	}
+
+	st := inspect(t)
+	info := toolInfoFor(st)
+	if asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(infoItemFor(st)); err != nil {
+			return 2
+		}
+		return 0
+	}
+
+	color := isTTY(os.Stdout)
+	name := st.Tool.Name
+	if name == "" {
+		name = st.Tool.Key
+	}
+	head := name
+	if st.Tool.Desc != "" {
+		head += "  " + dim(st.Tool.Desc, color)
+	}
+	fmt.Println(head)
+	fmt.Println("  " + paint(info.Headline, info.Kind, color))
+
+	keyW := 2
+	for _, f := range info.Fields {
+		keyW = max(keyW, lipgloss.Width(f.Key))
+	}
+	for _, f := range info.Fields {
+		for i, v := range strings.Split(f.Value, "\n") {
+			key := strings.Repeat(" ", keyW)
+			if i == 0 {
+				key = dim(theme.Pad(f.Key, keyW), color)
+			}
+			fmt.Printf("  %s  %s\n", key, paint(v, f.Kind, color))
+		}
+	}
+	if info.Err != "" {
+		fmt.Fprintf(os.Stderr, "%s: %s\n", st.Tool.Key, info.Err)
+	}
+	return 0
 }
 
 // inspectAll 一次查完本地和远端；CLI 的 list 用这个
@@ -418,7 +489,7 @@ func runChangelog(args []string) int {
 		}
 	}
 
-	entries, err := fetchChangelog(t.Repo, versions)
+	entries, err := fetchChangelog(t, versions)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", t.Key, err)
 		return 1
@@ -529,8 +600,46 @@ func runRemove(args []string) int {
 		return 2
 	}
 	fmt.Printf("已从配置里删掉 %s\n配置    %s\n", fs.Arg(0), shortenHome(path))
-	fmt.Println("（已经装好的二进制不会自动删除；要删文件自己去对应目录）")
+	fmt.Println("（已经装好的二进制没动；要删用 hmck uninstall " + fs.Arg(0) + "）")
 	return 0
+}
+
+func runUninstall(args []string) int {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	keepSkill := fs.Bool("keep-skill", false, "保留 agent skill")
+	if err := fs.Parse(reorderFlags(args)); err != nil {
+		fmt.Fprintln(os.Stderr, "参数不对: "+err.Error())
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "用法: hmck uninstall <tool> [--keep-skill]")
+		return 2
+	}
+	t, ok := toolByKey(fs.Arg(0))
+	if !ok {
+		fmt.Fprintf(os.Stderr, "没有这个工具: %s\n", fs.Arg(0))
+		return 2
+	}
+
+	res := uninstallTool(t, *keepSkill)
+	code := 0
+	if res.Err != "" {
+		fmt.Fprintf(os.Stderr, "卸载 %s 失败: %s\n", t.Key, res.Err)
+		code = 1
+	} else {
+		fmt.Printf("已卸载 %s\n", t.Key)
+	}
+	for _, s := range res.Removed {
+		fmt.Println("  删掉  " + s)
+	}
+	for _, s := range res.Kept {
+		fmt.Println("  留着  " + s)
+	}
+	if t.Self && res.Err == "" {
+		fmt.Println("\nhmck 已经删了。shell 里可能还记着它的路径，新开一个终端，或者跑一下 hash -r。")
+	}
+	return code
 }
 
 func splitList(s string) []string {

@@ -1,6 +1,10 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -29,6 +34,17 @@ var (
 	releaseAPIURL = func(repo string) string {
 		return "https://api.github.com/repos/" + repo + "/releases/latest"
 	}
+
+	// GitLab：permalink/latest 会 307 到最新 tag，资产挂在项目的 releases 下
+	gitlabLatestURL = func(repo string) string {
+		return "https://gitlab.com/api/v4/projects/" + url.PathEscape(repo) + "/releases/permalink/latest"
+	}
+	gitlabAssetURL = func(repo, tag, asset string) string {
+		return fmt.Sprintf("https://gitlab.com/%s/-/releases/%s/downloads/%s", repo, tag, asset)
+	}
+	gitlabReleasesAPIURL = func(repo string) string {
+		return "https://gitlab.com/api/v4/projects/" + url.PathEscape(repo) + "/releases?per_page=1"
+	}
 )
 
 var (
@@ -37,21 +53,37 @@ var (
 )
 
 // latestTag 先看 releases/latest 的跳转（不吃 API 限流），失败再问 API
-func latestTag(repo string) (string, error) {
-	if tag, err := latestTagViaRedirect(repo); err == nil {
+func latestTag(t tool) (string, error) {
+	if t.releaseHost() == "gitlab" {
+		if tag, err := gitlabLatestTagViaRedirect(t.Repo); err == nil {
+			return tag, nil
+		}
+		return gitlabLatestTagViaAPI(t.Repo)
+	}
+	if tag, err := latestTagViaRedirect(t.Repo); err == nil {
 		return tag, nil
 	}
-	return latestTagViaAPI(repo)
+	return latestTagViaAPI(t.Repo)
 }
 
 func latestTagViaRedirect(repo string) (string, error) {
+	return redirectTag(latestPageURL(repo))
+}
+
+func gitlabLatestTagViaRedirect(repo string) (string, error) {
+	return redirectTag(gitlabLatestURL(repo))
+}
+
+// redirectTag 拿到「最新版本」跳转的 Location，从路径末尾取 tag。
+// GitHub 用 302，GitLab 用 307，都按同一套解析。
+func redirectTag(pageURL string) (string, error) {
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	req, err := http.NewRequest(http.MethodGet, latestPageURL(repo), nil)
+	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -61,8 +93,11 @@ func latestTagViaRedirect(repo string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusMovedPermanently {
-		return "", fmt.Errorf("releases/latest 返回 %s", resp.Status)
+	switch resp.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
+		return "", fmt.Errorf("按最新版本跳转失败: %s", resp.Status)
 	}
 	loc, err := resp.Location()
 	if err != nil {
@@ -104,6 +139,47 @@ func latestTagViaAPI(repo string) (string, error) {
 		return "", errors.New("没有解析到版本号")
 	}
 	return rel.TagName, nil
+}
+
+// gitlabLatestTagViaAPI 退到 projects/<path>/releases?per_page=1，取第一条的 tag_name
+func gitlabLatestTagViaAPI(repo string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, gitlabReleasesAPIURL(repo), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "hmck/"+version)
+	resp, err := apiClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return "", errors.New("GitLab 拒绝了请求（私有仓库或限流），稍后再试")
+	case http.StatusNotFound:
+		return "", fmt.Errorf("%s 在 GitLab 上不存在或没有发布", repo)
+	default:
+		return "", fmt.Errorf("GitLab 返回 %s", resp.Status)
+	}
+	var rels []struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
+		return "", err
+	}
+	if len(rels) == 0 || rels[0].TagName == "" {
+		return "", fmt.Errorf("%s 还没有发布 release", repo)
+	}
+	return rels[0].TagName, nil
+}
+
+// releaseAssetURLFor 按工具的发布平台拼资产地址
+func releaseAssetURLFor(t tool, tag, asset string) string {
+	if t.releaseHost() == "gitlab" {
+		return gitlabAssetURL(t.Repo, tag, asset)
+	}
+	return releaseAssetURL(t.Repo, tag, asset)
 }
 
 // releaseInfo 是一次 release 查询的结果，用来在 `hmck add` 时推断平台和校验文件
@@ -189,7 +265,7 @@ func fetchTool(st toolState) (string, string, error) {
 	tag := st.Latest
 	if tag == "" {
 		var err error
-		if tag, err = latestTag(t.Repo); err != nil {
+		if tag, err = latestTag(t); err != nil {
 			return "", "", err
 		}
 	}
@@ -210,16 +286,25 @@ func fetchTool(st toolState) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	asset := assetName(t, runtime.GOOS, runtime.GOARCH)
-	tmp, err := downloadAsset(releaseAssetURL(t.Repo, tag, asset), dir)
+	asset := assetName(t, runtime.GOOS, runtime.GOARCH, ver)
+	tmp, err := downloadAsset(releaseAssetURLFor(t, tag, asset), dir)
 	if err != nil {
 		return "", "", err
 	}
 	if t.Checksums {
-		if err := verifyChecksum(t.Repo, tag, asset, tmp); err != nil {
+		// 校验的是下载到的那个资产本身：压缩包就校验压缩包
+		if err := verifyChecksum(t, tag, asset, tmp); err != nil {
 			os.Remove(tmp)
 			return "", "", err
 		}
+	}
+	if t.Archive {
+		extracted, err := extractBinary(t, tmp, dir)
+		os.Remove(tmp)
+		if err != nil {
+			return "", "", err
+		}
+		tmp = extracted
 	}
 	_ = os.Remove(cached) // Windows 上 rename 不能覆盖已存在的文件
 	if err := os.Rename(tmp, cached); err != nil {
@@ -326,8 +411,8 @@ func downloadAsset(assetURL, dir string) (string, error) {
 	return name, nil
 }
 
-func verifyChecksum(repo, tag, asset, file string) error {
-	resp, err := downloadClient.Get(releaseAssetURL(repo, tag, "checksums.txt"))
+func verifyChecksum(t tool, tag, asset, file string) error {
+	resp, err := downloadClient.Get(releaseAssetURLFor(t, tag, "checksums.txt"))
 	if err != nil {
 		return fmt.Errorf("下载 checksums.txt 失败: %w", err)
 	}
@@ -368,6 +453,124 @@ func verifyChecksum(repo, tag, asset, file string) error {
 }
 
 // installBinary 同目录临时文件 + rename；Windows 上正被占用就先挪开旧的
+// errEntryMissing 表示压缩包里没有要找的文件，换下一个候选名再试
+var errEntryMissing = errors.New("压缩包里没有这个文件")
+
+// extractBinary 从 .tar.gz / .zip 里取出二进制，落到缓存目录的临时文件。
+// 先按 BinPath（默认 bin/<binary>）精确找，再退到任意同名文件。
+func extractBinary(t tool, archivePath, dir string) (string, error) {
+	wanted := t.BinPath
+	if wanted == "" {
+		wanted = "bin/" + binaryName(t, runtime.GOOS)
+	}
+	for _, name := range []string{wanted, binaryName(t, runtime.GOOS)} {
+		out, err := extractEntry(archivePath, dir, name)
+		if err == nil {
+			return out, nil
+		}
+		if !errors.Is(err, errEntryMissing) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("%s 里没找到 %s", filepath.Base(archivePath), wanted)
+}
+
+// extractEntry 按文件头判断格式——下载下来的临时文件没有扩展名
+func extractEntry(archivePath, dir, name string) (string, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", err
+	}
+	head := make([]byte, 4)
+	n, _ := io.ReadFull(f, head)
+	f.Close()
+	switch {
+	case n >= 2 && head[0] == 0x1f && head[1] == 0x8b:
+		return extractEntryTarGz(archivePath, dir, name)
+	case bytes.HasPrefix(head[:n], []byte("PK\x03\x04")):
+		return extractEntryZip(archivePath, dir, name)
+	}
+	return "", fmt.Errorf("%s 不是 tar.gz 也不是 zip", filepath.Base(archivePath))
+}
+
+// entryMatches：带目录的按完整路径比，只有文件名的按 basename 比
+func entryMatches(entry, name string) bool {
+	if strings.Contains(name, "/") {
+		return entry == name
+	}
+	return path.Base(entry) == name
+}
+
+func extractEntryTarGz(archivePath, dir, name string) (string, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", fmt.Errorf("解压 %s 失败: %w", filepath.Base(archivePath), err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return "", errEntryMissing
+		}
+		if err != nil {
+			return "", fmt.Errorf("解压 %s 失败: %w", filepath.Base(archivePath), err)
+		}
+		if hdr.Typeflag != tar.TypeReg || !entryMatches(hdr.Name, name) {
+			continue
+		}
+		return writeExtracted(tr, dir)
+	}
+}
+
+func extractEntryZip(archivePath, dir, name string) (string, error) {
+	zr, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("解压 %s 失败: %w", filepath.Base(archivePath), err)
+	}
+	defer zr.Close()
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() || !entryMatches(f.Name, name) {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+		out, err := writeExtracted(rc, dir)
+		rc.Close()
+		return out, err
+	}
+	return "", errEntryMissing
+}
+
+func writeExtracted(src io.Reader, dir string) (string, error) {
+	out, err := os.CreateTemp(dir, ".hmck-x-*")
+	if err != nil {
+		return "", err
+	}
+	name := out.Name()
+	if _, err := io.Copy(out, src); err != nil {
+		out.Close()
+		os.Remove(name)
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(name)
+		return "", err
+	}
+	if err := os.Chmod(name, 0o755); err != nil {
+		os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
 func installBinary(tmpName, target string) error {
 	if err := os.Chmod(tmpName, 0o755); err != nil {
 		return err

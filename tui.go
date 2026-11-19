@@ -41,6 +41,8 @@ const (
 	working
 	result
 	notes
+	infoPage
+	confirmUninstall
 )
 
 type resultLine struct {
@@ -78,6 +80,22 @@ type tuiModel struct {
 
 	chg  map[string]changelogState // 更新日志缓存：tool key -> 最近的几个版本
 	note notesView                 // 正在看的更新日志页
+	info infoView                  // 正在看的信息页
+
+	confirm      uninstallView // 正在确认卸载哪个工具
+	exitOnResult bool          // 卸载了 hmck 自己：结果页按任意键退出
+}
+
+// uninstallView 是卸载确认页的状态：带上整个 toolState，
+// 页面上才能说清删哪一份、PATH 上还有哪份要留着
+type uninstallView struct {
+	tool toolState
+}
+
+// infoView 是信息页的状态：只记看的是哪个工具，内容每次从 states 现算，
+// 后台查回来的最新版本、重新扫出来的路径会直接反映到页面上
+type infoView struct {
+	tool tool
 }
 
 // changelogState 是一个工具更新日志的缓存
@@ -121,6 +139,8 @@ type installDoneMsg struct {
 }
 
 type execDoneMsg struct{ err error }
+
+type uninstallDoneMsg struct{ res uninstallResult }
 
 type installResult struct {
 	key, from, to string
@@ -206,7 +226,7 @@ func (m tuiModel) prefetchChangelogs() tea.Cmd {
 // changelogCmd 拉一个工具的更新日志；prefetch 时只用来填列表预览
 func changelogCmd(t tool, limit, gen int, prefetch bool) tea.Cmd {
 	return func() tea.Msg {
-		entries, err := fetchChangelog(t.Repo, limit)
+		entries, err := fetchChangelog(t, limit)
 		return changelogMsg{key: t.Key, entries: entries, err: err, gen: gen, prefetch: prefetch}
 	}
 }
@@ -238,7 +258,7 @@ func latestCheckCmd(tools []tool, ch chan tea.Msg, gen int) tea.Cmd {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				tag, err := latestTag(t.Repo)
+				tag, err := latestTag(t)
 				msg := latestDoneMsg{gen: gen, key: t.Key}
 				if err != nil {
 					msg.err = err
@@ -299,6 +319,12 @@ func installCmd(st toolState) tea.Cmd {
 	return func() tea.Msg {
 		v, err := installTool(st)
 		return installDoneMsg{key: st.Tool.Key, from: st.Installed, version: v, err: err}
+	}
+}
+
+func uninstallCmd(t tool, keepSkill bool) tea.Cmd {
+	return func() tea.Msg {
+		return uninstallDoneMsg{res: uninstallTool(t, keepSkill)}
 	}
 }
 
@@ -491,6 +517,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.note.entries = msg.entries
 		}
 
+	case uninstallDoneMsg:
+		m.state = result
+		m.resultLines = msg.res.lines()
+		m.confirm = uninstallView{}
+		if msg.res.Err == "" {
+			m.forgetTool(msg.res.Tool.Key)
+			delete(m.staged, msg.res.Tool.Key)
+			// 把自己删了：这个进程还在跑，但没有下次了，结果看完就退出
+			m.exitOnResult = msg.res.Tool.Self
+		}
+
 	case execDoneMsg:
 		if msg.err != nil {
 			m.state = result
@@ -533,6 +570,23 @@ func (m *tuiModel) markUpdated(key, newVer string) {
 			if p, ok := findTool(m.states[i].Tool); ok {
 				m.states[i].Path = p
 			}
+		}
+	}
+}
+
+// forgetTool 把刚卸载的工具在列表里改回「没装」。
+// 不整表重扫：重扫会把 hmck 自己读回正在运行的旧版本，也会把页面顶回列表
+func (m *tuiModel) forgetTool(key string) {
+	for i := range m.states {
+		if m.states[i].Tool.Key != key {
+			continue
+		}
+		t := m.states[i].Tool
+		latest := m.states[i].Latest
+		m.states[i] = toolState{Tool: t, Latest: latest}
+		if !t.Self {
+			// 自己那份删了，PATH 上别人的副本可能还在，卡片上照样说清楚
+			m.states[i].Foreign = foreignCopies(t, "")
 		}
 	}
 }
@@ -599,6 +653,16 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m.startNotes()
+		case "i":
+			if !m.localReady || len(m.states) == 0 {
+				return m, nil
+			}
+			return m.startInfo()
+		case "d":
+			if !m.localReady || len(m.states) == 0 {
+				return m, nil
+			}
+			return m.startUninstall(m.states[m.cursor])
 		case "s":
 			m.state = working
 			m.workText = "正在安装 agent skill…"
@@ -610,12 +674,32 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case result:
+		// 刚把自己卸载了：这进程还能跑，但没有下次了，看完结果就退出
+		if m.exitOnResult {
+			return m, tea.Quit
+		}
 		// 结果页的版本状态在结果消息里已经更新过，回列表直接切屏即可；
 		// 再重扫一遍会把刚升级的 hmck 自己读回运行中的旧版本，也会让页面一直停在结果页
 		if k.String() == "q" || k.String() == "esc" {
 			return m, tea.Quit
 		}
 		m.state = list
+		return m, nil
+
+	case confirmUninstall:
+		switch k.String() {
+		case "y", "Y":
+			st := m.confirm.tool
+			m.state = working
+			m.workText = "正在卸载 " + st.Tool.Key + "…"
+			return m, tea.Batch(m.spin.Tick, uninstallCmd(st.Tool, false))
+		case "n", "N", "esc":
+			m.state = list
+			m.confirm = uninstallView{}
+			return m, nil
+		case "q":
+			return m, tea.Quit
+		}
 		return m, nil
 
 	case notes:
@@ -643,6 +727,24 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.note.scroll = clampInt(m.note.scroll, 0, m.notesMaxScroll())
 		return m, nil
+
+	case infoPage:
+		switch k.String() {
+		case "enter", "esc":
+			m.state = list
+			m.info = infoView{}
+			return m, nil
+		case "g":
+			return m.startNotesFor(m.info.tool)
+		case "u":
+			return m.startInstall(m.stateOf(m.info.tool.Key))
+		case "d":
+			return m.startUninstall(m.stateOf(m.info.tool.Key))
+		case "r":
+			return m.refresh() // 留在信息页，数据回来后原地刷新
+		case "q":
+			return m, tea.Quit
+		}
 	}
 	return m, nil
 }
@@ -688,6 +790,9 @@ func (m tuiModel) animating() bool {
 	}
 	if m.state == notes {
 		return m.note.loading
+	}
+	if m.state == infoPage {
+		return !m.localReady || len(m.pending) > 0 // 信息页上「读取中」的圈也得转
 	}
 	return m.state == list && (!m.localReady || len(m.pending) > 0)
 }
@@ -765,14 +870,56 @@ func (m tuiModel) startAutoDownload() (tea.Model, tea.Cmd) {
 // ---------- 更新日志 ----------
 
 func (m tuiModel) startNotes() (tea.Model, tea.Cmd) {
-	st := m.states[m.cursor]
+	return m.startNotesFor(m.states[m.cursor].Tool)
+}
+
+// startNotesFor 打开指定工具的更新日志；从列表和信息页都能进来
+func (m tuiModel) startNotesFor(t tool) (tea.Model, tea.Cmd) {
+	st := m.stateOf(t.Key)
 	m.state = notes
-	m.note = notesView{tool: st.Tool, current: st.Installed, latest: st.Latest}
-	if c, ok := m.chg[st.Tool.Key]; ok && len(c.entries) > 0 {
+	m.note = notesView{tool: t, current: st.Installed, latest: st.Latest}
+	if c, ok := m.chg[t.Key]; ok && len(c.entries) > 0 {
 		m.note.entries = c.entries
 		return m, nil
 	}
 	return m.loadNotes()
+}
+
+// startInfo 打开信息页：装在哪、是不是最新、登录成了谁
+func (m tuiModel) startInfo() (tea.Model, tea.Cmd) {
+	m.state = infoPage
+	m.info = infoView{tool: m.states[m.cursor].Tool}
+	return m, nil
+}
+
+// startUninstall 按 d 之后先进确认页：删哪一份、留哪一份，看完再按 y。
+// hmck 目录里没有这个工具就直接说清楚，不开一个空确认页
+func (m tuiModel) startUninstall(st toolState) (tea.Model, tea.Cmd) {
+	if managedCopy(st.Tool) == "" {
+		m.state = result
+		m.resultLines = []resultLine{{text: "hmck 目录里没有 " + st.Tool.Key + "，没什么可卸载的", ok: false}}
+		for _, p := range st.Foreign {
+			m.resultLines = append(m.resultLines,
+				resultLine{text: "  PATH 上的 " + shortenHome(p) + "（不是 hmck 装的，不归 hmck 删）", ok: true})
+		}
+		return m, nil
+	}
+	m.state = confirmUninstall
+	m.confirm = uninstallView{tool: st}
+	return m, nil
+}
+
+// stateOf 按 key 找当前状态；找不到就返回一个只有工具信息的空壳
+func (m tuiModel) stateOf(key string) toolState {
+	for _, st := range m.states {
+		if st.Tool.Key == key {
+			return st
+		}
+	}
+	if m.info.tool.Key == key {
+		return toolState{Tool: m.info.tool}
+	}
+	return toolState{}
 }
 
 func (m tuiModel) loadNotes() (tea.Model, tea.Cmd) {
@@ -827,6 +974,10 @@ func (m tuiModel) View() string {
 		body = m.viewResult()
 	case notes:
 		body = m.viewNotes()
+	case infoPage:
+		body = m.viewInfo()
+	case confirmUninstall:
+		body = m.viewConfirm()
 	}
 	return "\n" + body + "\n"
 }
@@ -905,7 +1056,7 @@ func (m tuiModel) viewList() string {
 	}
 	b.WriteString("\n")
 	b.WriteString(m.viewHints("↑↓", "选择", "enter", "启动/安装", "u", "升级", "U", "全部更新",
-		"g", "更新日志", "s", "装 skill", "r", "重新检查", "q", "退出"))
+		"i", "信息", "g", "更新日志", "d", "卸载", "s", "装 skill", "r", "重新检查", "q", "退出"))
 	return b.String()
 }
 
@@ -1001,6 +1152,9 @@ func (m tuiModel) versionCell(st toolState) string {
 		icon, iconStyle, verStyle = m.spin.View(), styles.Dim, styleVerOld
 	}
 	switch {
+	case st.Installed == "" && st.ForeignVer != "":
+		// hmck 这边没装，但 PATH 上有一份能用的：写它是哪一版，别让人以为这台机器没有
+		return iconStyle.Render(icon) + " " + styleVerOld.Render("PATH 上的 "+st.ForeignVer)
 	case st.Installed == "":
 		return iconStyle.Render(icon) + " " + styleVerOld.Render("未安装")
 	case st.Latest == "":
@@ -1051,6 +1205,10 @@ func (m tuiModel) renderCard(st toolState, selected bool, cols cardCols) string 
 		desc, tail = "正在读取本地安装位置…", ""
 	case st.Installed == "" && st.CheckErr != "":
 		tail, tailStyle = "  "+st.CheckErr, styles.Warn
+	case st.Installed == "" && len(st.Foreign) > 0:
+		// PATH 上已经有一份别人的（brew 装的 glab 之类）：hmck 不接管，只装自己那份
+		tail, tailStyle = "  ·  PATH 上已有一份，hmck 不接管；按 enter 装自己那份", styles.Dim
+		tailShort = "  ·  PATH 上已有一份"
 	case st.Installed == "":
 		tail, tailStyle = "  ·  按 enter 安装到 "+shortenHome(m.installHint()), styles.Dim
 		tailShort = "  ·  按 enter 安装"
@@ -1088,12 +1246,21 @@ func (m tuiModel) renderCard(st toolState, selected bool, cols cardCols) string 
 			stylePath.Render(p)
 	}
 
-	// 第三行：仓库 + 最近一版的说明（启动时顺手抓回来的），高度正好和招牌齐平
+	// 第三行：仓库 + 登录状态（glab 这类）+ 最近一版的说明。
+	// 登录状态排在日志前面：登没登录比这版改了什么更要紧
 	line3 := stylePath.Render(st.Tool.Repo)
+	used := lipgloss.Width(st.Tool.Repo)
+	if st.Login != "" {
+		if avail := w - used - 5; avail >= 12 {
+			badge := theme.Truncate(st.Login, avail)
+			line3 += styles.Dim.Render("  ·  ") + kindStyle(st.LoginKind).Render(badge)
+			used += 5 + lipgloss.Width(badge)
+		}
+	}
 	if c, ok := m.chg[st.Tool.Key]; ok && len(c.entries) > 0 {
 		if s := c.entries[0].summary(); s != "" {
 			note := "v" + c.entries[0].Version + "  " + s
-			if avail := w - lipgloss.Width(st.Tool.Repo) - 5; avail >= 12 {
+			if avail := w - used - 5; avail >= 12 {
 				line3 += styles.Dim.Render("  ·  " + theme.Truncate(note, avail))
 			}
 		}
@@ -1151,7 +1318,11 @@ func (m tuiModel) viewResult() string {
 		b.WriteString("  " + style.Render(l.text) + "\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(styles.Hints("任意键", "返回"))
+	if m.exitOnResult {
+		b.WriteString(styles.Hints("任意键", "退出"))
+	} else {
+		b.WriteString(styles.Hints("任意键", "返回"))
+	}
 	return b.String()
 }
 
@@ -1195,6 +1366,101 @@ func (m tuiModel) viewNotes() string {
 	b.WriteString("\n")
 	b.WriteString(m.viewHints("↑↓", "滚动", "pgup/pgdn", "翻页", "r", "刷新", "esc", "返回"))
 	return b.String()
+}
+
+// viewInfo 是信息页：左边招牌，右边一句话讲清情况，下面一行行明细。
+// 内容每次从 states 现算，所以后台查回来的最新版本会直接出现在页面上
+func (m tuiModel) viewInfo() string {
+	st := m.stateOf(m.info.tool.Key)
+	info := toolInfoFor(st)
+	w := m.contentWidth()
+
+	head := []string{
+		styles.Title.Render(st.Tool.Key) + styles.Dim.Render("  信息"),
+		kindStyle(info.Kind).Render(theme.Truncate(info.Headline, w-4)),
+		styles.Dim.Render(st.Tool.Repo),
+	}
+	var b strings.Builder
+	for i, l := range toolLogo(st.Tool) {
+		b.WriteString(styles.Accent.Render(l) + "  " + head[i] + "\n")
+	}
+	b.WriteString("\n")
+
+	if !m.localReady {
+		b.WriteString("  " + m.spin.View() + "  " + styles.Dim.Render("正在读取本地安装位置…") + "\n")
+	} else {
+		keyW := 2
+		for _, f := range info.Fields {
+			keyW = max(keyW, lipgloss.Width(f.Key))
+		}
+		keyW = min(keyW, 10)
+		for _, f := range info.Fields {
+			for i, v := range strings.Split(f.Value, "\n") {
+				key := strings.Repeat(" ", keyW)
+				if i == 0 {
+					key = styles.Dim.Render(theme.Pad(f.Key, keyW))
+				}
+				b.WriteString("  " + key + "  " +
+					kindStyle(f.Kind).Render(theme.Truncate(v, w-keyW-4)) + "\n")
+			}
+		}
+	}
+	if info.Err != "" {
+		b.WriteString("  " + styles.Bad.Render(theme.Truncate(info.Err, w-2)) + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(m.viewHints("g", "更新日志", "u", "升级/安装", "d", "卸载", "r", "重新检查", "esc", "返回"))
+	return b.String()
+}
+
+// viewConfirm 是卸载确认页：先摊开删什么、留什么，再让人按 y。
+// 删列表用的是和 info 页同一套行格式，颜色一眼就能分出「删」和「留」
+func (m tuiModel) viewConfirm() string {
+	st := m.confirm.tool
+	fields := uninstallPreview(st)
+	w := m.contentWidth()
+
+	head := []string{
+		styles.Title.Render(st.Tool.Key) + styles.Dim.Render("  卸载"),
+		styles.Warn.Render("按 y 确认，下面这些会被删掉"),
+		styles.Dim.Render(st.Tool.Repo),
+	}
+	var b strings.Builder
+	for i, l := range toolLogo(st.Tool) {
+		b.WriteString(styles.Accent.Render(l) + "  " + head[i] + "\n")
+	}
+	b.WriteString("\n")
+
+	keyW := 2
+	for _, f := range fields {
+		keyW = max(keyW, lipgloss.Width(f.Key))
+	}
+	for _, f := range fields {
+		b.WriteString("  " + styles.Dim.Render(theme.Pad(f.Key, keyW)) + "  " +
+			kindStyle(f.Kind).Render(theme.Truncate(f.Value, w-keyW-4)) + "\n")
+	}
+	if st.Tool.Self {
+		b.WriteString("\n")
+		b.WriteString("  " + styles.Bad.Render("这是 hmck 自己：删了 hmck 就没了，要装回来得重新下载一次。") + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(m.viewHints("y", "确认卸载", "n/esc", "算了", "q", "退出"))
+	return b.String()
+}
+
+// kindStyle 把信息行的 kind 翻成颜色：ok 绿、warn 黄、missing 红，其余用普通版本色
+func kindStyle(kind string) lipgloss.Style {
+	switch kind {
+	case "ok":
+		return styles.Good
+	case "warn", "behind":
+		return styles.Warn
+	case "missing":
+		return styles.Bad
+	}
+	return styleVer
 }
 
 // notesHeight 是日志正文能占几行：留出三行招牌、空行和底部提示

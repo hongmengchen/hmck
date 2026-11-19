@@ -20,7 +20,7 @@ var embeddedSkill string
 
 // skillRoot 是 agent 扫描的全局目录，默认 ~/.claude/skills
 func skillRoot() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := userHomeDir()
 	if err != nil {
 		return "", err
 	}

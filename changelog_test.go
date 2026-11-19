@@ -86,7 +86,7 @@ func TestFetchChangelogFallsBackToReleases(t *testing.T) {
 	releasesListURL = func(repo string) string { return srv.URL + "/repos/" + repo + "/releases" }
 	t.Cleanup(func() { changelogRawURL, releasesListURL = oldRaw, oldRel })
 
-	entries, err := fetchChangelog("someone/tool", 3)
+	entries, err := fetchChangelog(tool{Key: "tool", Repo: "someone/tool"}, 3)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("fetchChangelog = %+v, %v", entries, err)
 	}
@@ -95,6 +95,24 @@ func TestFetchChangelogFallsBackToReleases(t *testing.T) {
 	}
 	if got := entries[0].summary(); got != "第一件事" {
 		t.Errorf("release summary = %q", got)
+	}
+}
+
+// release 说明里的标题级别不固定，`## Changelog` 这种整段包起来的不能当成条目
+func TestSectionsFromMarkdownSkipsWrappedHeading(t *testing.T) {
+	secs := sectionsFromMarkdown("## Changelog\n\n### Features\n\n- 加了一个功能\n- 修了一个 bug\n")
+	entries := []changeEntry{{Version: "1.131.0", Sections: secs}}
+	if got := entries[0].summary(); got != "加了一个功能" {
+		t.Fatalf("summary = %q，标题被当成了条目: %+v", got, secs)
+	}
+	if secs[0].Title != "Features" || len(secs[0].Items) != 2 {
+		t.Errorf("小节 = %+v", secs)
+	}
+
+	// 井号后面没有空格的是 issue 引用，不是标题
+	secs = sectionsFromMarkdown("#123 修掉一个崩溃\n")
+	if got := (changeEntry{Sections: secs}).summary(); got != "#123 修掉一个崩溃" {
+		t.Errorf("issue 引用被当成标题: %+v", secs)
 	}
 }
 
@@ -116,12 +134,44 @@ func TestFetchChangelogPrefersRepoFile(t *testing.T) {
 	releasesListURL = func(repo string) string { return srv.URL + "/repos/" + repo + "/releases" }
 	t.Cleanup(func() { changelogRawURL, releasesListURL = oldRaw, oldRel })
 
-	entries, err := fetchChangelog("someone/tool", 5)
+	entries, err := fetchChangelog(tool{Key: "tool", Repo: "someone/tool"}, 5)
 	if err != nil || len(entries) != 1 || entries[0].Version != "2.0.0" {
 		t.Fatalf("fetchChangelog = %+v, %v", entries, err)
 	}
 	if askedAPI {
 		t.Error("有 CHANGELOG.md 还去问了 release API")
+	}
+}
+
+// GitLab 的 release 用 released_at / description，仓库文件在 /-/raw/ 下
+func TestFetchChangelogGitLab(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/-/raw/"):
+			w.WriteHeader(http.StatusNotFound)
+		case strings.Contains(r.URL.Path, "/releases"):
+			fmt.Fprint(w, `[{"tag_name":"v1.131.0","released_at":"2026-03-04T05:06:07Z",`+
+				`"description":"### 变更\n\n- 在 GitLab 上发的新版"}]`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	oldRaw, oldRel := gitlabChangelogRawURL, gitlabReleasesListURL
+	gitlabChangelogRawURL = func(repo string) string { return srv.URL + "/" + repo + "/-/raw/main/CHANGELOG.md" }
+	gitlabReleasesListURL = func(repo string) string { return srv.URL + "/projects/" + repo + "/releases" }
+	t.Cleanup(func() { gitlabChangelogRawURL, gitlabReleasesListURL = oldRaw, oldRel })
+
+	entries, err := fetchChangelog(tool{Key: "glab", Repo: "group/tool", Host: "gitlab"}, 3)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("fetchChangelog = %+v, %v", entries, err)
+	}
+	if entries[0].Version != "1.131.0" || entries[0].Date != "2026-03-04" {
+		t.Errorf("GitLab release 版本 = %+v", entries[0])
+	}
+	if got := entries[0].summary(); got != "在 GitLab 上发的新版" {
+		t.Errorf("GitLab release summary = %q", got)
 	}
 }
 

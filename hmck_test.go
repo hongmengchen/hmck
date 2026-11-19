@@ -43,10 +43,10 @@ func TestAssetNamesAndSupport(t *testing.T) {
 			npmTool = t0
 		}
 	}
-	if got := assetName(npmTool, "darwin", "arm64"); got != "npm-token_darwin_arm64" {
+	if got := assetName(npmTool, "darwin", "arm64", ""); got != "npm-token_darwin_arm64" {
 		t.Errorf("asset = %q", got)
 	}
-	if got := assetName(npmTool, "windows", "amd64"); got != "npm-token_windows_amd64.exe" {
+	if got := assetName(npmTool, "windows", "amd64", ""); got != "npm-token_windows_amd64.exe" {
 		t.Errorf("windows asset = %q", got)
 	}
 	if got := binaryName(npmTool, "windows"); got != "npm-token.exe" {
@@ -139,13 +139,13 @@ func TestLatestTagRedirectAndFallback(t *testing.T) {
 	defer func() { latestPageURL, releaseAPIURL = oldPage, oldAPI }()
 
 	latestPageURL = func(string) string { return srv.URL + "/releases/latest" }
-	if tag, err := latestTag("o/r"); err != nil || tag != "v9.9.9" {
+	if tag, err := latestTag(tool{Repo: "o/r"}); err != nil || tag != "v9.9.9" {
 		t.Fatalf("redirect: tag=%q err=%v", tag, err)
 	}
 
 	latestPageURL = func(string) string { return srv.URL + "/notfound" }
 	releaseAPIURL = func(string) string { return srv.URL + "/api/releases/latest" }
-	if tag, err := latestTag("o/r"); err != nil || tag != "v8.8.8" {
+	if tag, err := latestTag(tool{Repo: "o/r"}); err != nil || tag != "v8.8.8" {
 		t.Fatalf("api fallback: tag=%q err=%v", tag, err)
 	}
 }

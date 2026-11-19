@@ -1,13 +1,13 @@
 ---
 name: hmck
-description: 管理这台机器上的一组命令行小工具（kube-token、npm-token 及以后新增的，也包括 hmck 自己），看已装/最新版本、一键安装或升级、直接启动，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token」「自动更新」「新增一个工具让 hmck 管理」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
+description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、glab 及以后新增的，也包括 hmck 自己），看已装/最新版本和登录状态、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab」「glab 登没登录」「卸载某个工具 / 卸载 hmck」「自动更新」「新增一个工具让 hmck 管理」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
 ---
 
 # hmck
 
-`hmck` 是这台机器上的工具管理器：内置 kube-token、npm-token、以及它自己，也能把以后的新工具加进来。
-它知道每个工具的已安装版本、GitHub 最新版本、安装路径，能安装、升级、直接启动，
-还会顺手把各工具的 agent skill 刷新到全局目录。
+`hmck` 是这台机器上的工具管理器：内置 kube-token、npm-token、glab 以及它自己，也能把以后的新工具加进来。
+它知道每个工具的已安装版本、最新版本、安装路径，能安装、升级、直接启动、卸载，
+还会顺手把各工具的 agent skill 刷新到全局目录；对 glab 这类工具，它还能读出登录状态。
 
 **agent 一律走 CLI，不要启动 TUI。** `hmck`（无参数）会进全屏 TUI，需要真终端；
 CLI 的每个动作都有对应命令，输出也可以 `--json`。
@@ -15,22 +15,30 @@ CLI 的每个动作都有对应命令，输出也可以 `--json`。
 ## 铁律
 
 1. **不要回显任何 token。** hmck 本身不碰密钥，但它管理的工具会；调用它们时输出里只会有掩码。
+   `hmck info glab` 只跑 `glab auth status`，输出里也只有主机、账号、凭证来源，不会打印 token。
 2. **不要擅自改用户的真实配置。** `~/.npmrc`、`~/.kube/config` 的写入交给 kube-token /
    npm-token 自己做（它们会自动备份、复验、必要时还原），agent 不要手改文件。
-3. **升级只走 hmck。** 不要用 `go install`、手动下载二进制或改 PATH 来「修好」某个工具；
-   `hmck upgrade` 会校验 checksum 并原子替换，路径也保持一致。
-4. **不确定用户要不要装/升级时先问。** 安装和升级会写用户的 `~/.local/bin`
-   （Windows 是 `%USERPROFILE%\.local\bin`，或工具当前所在位置），属于会改系统的动作；看版本、列清单则随便跑。
+3. **升级和卸载只走 hmck。** 不要用 `go install`、手动下载二进制或改 PATH 来「修好」某个工具，
+   也不要手动 `rm` 来卸载；`hmck upgrade` 会校验 checksum 并原子替换，`hmck uninstall` 只删 hmck 装出来的那份。
+4. **不确定用户要不要装/升级/卸载时先问。** 这些动作会写或删用户的 `~/.local/bin`
+   （Windows 是 `%USERPROFILE%\.local\bin`，或工具当前所在位置），属于会改系统的动作；看版本、列清单、看信息则随便跑。
 
 ## 1. 看现状
 
 ```bash
 hmck list              # 纯文本表格：NAME / 已安装 / 最新 / 状态
 hmck list --json       # 给脚本/agent 解析
+hmck info glab         # 一个工具的详情，包括 glab 的登录状态（--json 给脚本）
 hmck version
 ```
 
-`--json` 每条形如：
+`hmck info <tool>` 是「这个工具现在怎么样」：先一行总结（`✓ 已登录 alice@git.example.com`、
+`○ 还没登录`、`✓ 已是最新`、`可升级 1.2.3`），再列字段。glab 这类能读登录状态的工具，
+字段是：主机、账号、凭证来源（系统钥匙串 / 配置文件 / 环境变量）、传输（`git ssh · API https`）、
+REST API、GraphQL、其他登录过的主机；之后每个工具都有版本、最新、位置、更新时间、
+PATH 上的其他副本和仓库。只跑 `glab auth status`，不会读 token 本身。
+
+`list --json` 每条形如：
 
 ```json
 {
@@ -47,7 +55,8 @@ hmck version
 
 `installed` 为空表示没装；`latest` 为空表示没查到（`error` 里写原因，常见是网络或 API 限流）。
 `updated_at` 是上一次版本更新时间：hmck 装/升级成功时记进 `state.json`；不是 hmck 装的，用二进制文件的修改时间。
-版本检测：已装版本读 `<tool> version`；最新版看 GitHub `releases/latest` 的跳转，失败再退回 API。
+版本检测：已装版本读 `<tool> version`；最新版看 GitHub `releases/latest` 的跳转（GitLab 工具看
+`releases/permalink/latest`），失败再退回 API。
 
 ## 2. 安装 / 升级 / 启动
 
@@ -71,11 +80,33 @@ hmck run npm-token --help       # 直接启动工具，后面的参数原样传�
 - `hmck run` 会透传退出码，脚本里可以直接用。
 
 TUI（只有用户自己在终端里用）：`↑↓` 选择，`enter` 启动（没装则安装；选到 hmck 自己是升级），
-`u` 升级选中的，`U` 一键升级所有可升级的，`g` 看更新日志，`s` 装/刷新 agent skill，`r` 重新检查，`q` 退出。
+`u` 升级选中的，`U` 一键升级所有可升级的，`i` 看信息页，`g` 看更新日志，`d` 卸载，
+`s` 装/刷新 agent skill，`r` 重新检查，`q` 退出。
 卡片上版本号前的图标就是状态：`✓` 已是最新、`↑` 可更新（`旧 → 新`）、`↓` 已下载待安装、
 `○` 未安装、`!` 查不到最新版或没有对应平台的发布。第一行右边是上次版本更新时间。
-每张卡片左边是该工具自己的招牌，第三行是仓库和最近一版的第一条说明（启动时抓
-`CHANGELOG.md`，失败就只显示仓库名）。
+每张卡片左边是该工具自己的招牌，第三行是仓库、登录状态（glab 这类）和最近一版的第一条说明
+（启动时抓 `CHANGELOG.md`，失败就只显示仓库名）。
+
+glab 在 brew / apt 装的人多，hmck 只认自己目录里的那一份（`OwnDir`）：PATH 上别人装的副本
+不接管、不删，卡片上注明「PATH 上已有一份」并显示那份的版本号。装不装、卸不卸都看用户的意思。
+
+## 卸载
+
+```bash
+hmck uninstall glab               # 删掉 hmck 装的那一份
+hmck uninstall glab --keep-skill  # 二进制删掉，agent skill 留着
+```
+
+删的是：二进制（`~/.local/bin/<tool>`）、带 `SKILL.md` 的 `~/.claude/skills/<tool>/`、
+只属于它的预下载缓存、它的更新时间记录。不删：PATH 上别的副本（结果里说明「不是 hmck 装的」）、
+自定义工具的配置（要一起删用 `hmck rm`）、`~/.npmrc` / kubeconfig 这类工具自己的配置。
+
+hmck 自己也能卸（TUI 里选到 hmck 按 `d`，或 `hmck uninstall hmck`）：删的是正在运行的
+那个可执行文件，Windows 上删不掉就先改名成 `.old`。卸载自己后进程还活着，TUI 结果页
+按任意键就退出。没有 hmck 装的那份时（比如只有 brew 的 glab），命令返回非零并说明
+「hmck 目录里没有 <tool>」，不会假装删掉了。
+
+CLI 的退出码：0 成功，1 没删成功（会写原因），2 参数不对。
 
 ## 看更新日志
 
@@ -85,7 +116,8 @@ hmck changelog kube-token --versions 2
 ```
 
 输出是纯文本：`vX.Y.Z  日期  当前/最新`，下面按「新增 / 变更 / 修复 / 安全」小节列条目。
-数据优先读仓库 `main` 分支的 `CHANGELOG.md`，没有就退到 GitHub release notes；
+数据优先读仓库 `main` 分支的 `CHANGELOG.md`，没有就退到 release notes（GitHub 工具用 GitHub API，
+GitLab 工具如 glab 用 GitLab API）；
 带 `GH_TOKEN` / `GITHUB_TOKEN` 时会附上，避免 API 限流。用户问「最近改了什么」「这个版本有什么新东西」
 时用它，不要去猜。
 
@@ -142,10 +174,13 @@ hmck rm my-tool                      # 只删自定义工具
 3. 可选：实现 `<tool> skill [--quiet] [--print] [--dir DIR]` 子命令，并在仓库里放
    `.claude/skills/<key>/SKILL.md` 用 `//go:embed` 打进二进制；这样 `hmck skill`
    和安装后的自动刷新都能覆盖它。`hmck add` 时加 `--skill` 标记。
-4. 新工具的版本号要能被 `<tool> version` 输出（最后一个字段当版本号）。
+4. `<tool> version` 的输出里要有一个像版本号的词（`1.2.3` / `v1.2.3`），hmck 找第一个；
+   都不像才退回取最后一个字段。（glab 的输出是 `glab 1.130.0 (9b430a11f)`，取最后一个会拿到 commit 号。）
 
 **备选：写进内置列表。** 在 `tools.go` 的 `registry` 加一条，发新版 hmck。
 内置工具 key 优先于自定义配置，不能被 `hmck add` 覆盖、也不能 `hmck rm`。
+发布在 GitLab 的加 `Host: "gitlab"`；资产名不规范用 `Asset` 模板、压缩包开 `Archive`；
+只接管自己装的那份用 `OwnDir`；能读登录状态的用 `Status`（目前只有 glab）。
 
 ## 5. 在本仓库里改代码时
 
@@ -171,3 +206,7 @@ hmck rm my-tool                      # 只删自定义工具
 | hmck 升级后还是旧版本 | 正在运行的是旧进程；退出重开，或 `hmck version` 确认磁盘上的新版本 |
 | 装了却找不到命令 | 安装目录不在 PATH；hmck 仍能启动它，用户重开终端或把目录加进 PATH |
 | 工具没有 skill | 版本太旧（还没实现 `skill` 子命令）；先 `hmck upgrade <tool>` |
+| glab 显示「还没登录」 | 在终端里跑 `glab auth login`；`GITLAB_TOKEN` 这类环境变量只在当前 shell 里算数 |
+| glab 显示「读不出登录状态」 | glab 版本太旧，没有 `auth status`；`hmck install glab` 装自己那份 |
+| 卸载说「hmck 目录里没有 xx」 | 只有 PATH 上别人装的那份（brew 等），不归 hmck 删；结果里会列出它在哪 |
+| 卸载 hmck 后命令还在 | shell 缓存了路径；`hash -r` 或新开终端 |

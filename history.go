@@ -93,6 +93,27 @@ func recordUpdate(key, version string) {
 	_ = writeHistory(snapshot)
 }
 
+// removeUpdate 卸载后把这条记录也去掉，重新装上时不会显示上一轮的更新时间
+func removeUpdate(key string) {
+	if key == "" {
+		return
+	}
+	var snapshot map[string]updateRecord
+	withHistory(func(m map[string]updateRecord) {
+		if _, ok := m[key]; !ok {
+			return
+		}
+		delete(m, key)
+		snapshot = make(map[string]updateRecord, len(m))
+		for k, v := range m {
+			snapshot[k] = v
+		}
+	})
+	if snapshot != nil {
+		_ = writeHistory(snapshot)
+	}
+}
+
 func writeHistory(m map[string]updateRecord) error {
 	path, err := historyPath()
 	if err != nil {

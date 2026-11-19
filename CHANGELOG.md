@@ -2,6 +2,26 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.10.0] - 2026-11-19
+
+### 新增
+
+- 接入 glab（GitLab 官方 CLI）：在 gitlab.com 发版，资产是压缩包，下载、校验、升级和其他工具同一套；hmck 只认自己目录里的那一份，PATH 上 brew / apt 装的不接管，卡片上注明「PATH 上已有一份」
+- 卡片第三行显示 glab 的登录状态（`已登录 alice` / `还没登录`），排在更新日志前面；装了别的 glab 而 hmck 没装时，显示 PATH 上那份的版本号
+- 按 `i` 打开信息页：glab 的登录主机、账号、凭证来源（系统钥匙串 / 配置文件 / 环境变量）、git 和 API 协议、REST 与 GraphQL 地址、其他登录过的主机；每个工具都有版本、位置、更新时间、PATH 上的其他副本和仓库
+- `hmck info <tool>`：命令行里看同一份信息，`--json` 给脚本用；只跑 `glab auth status`，不读 token 本身
+- 所有工具都能卸载，包括 hmck 自己：列表里按 `d` 先进确认页，摊开「删什么、留什么」，按 `y` 才动手；卸载自己后看完结果页按任意键退出
+- `hmck uninstall <tool> [--keep-skill]`：命令行卸载；只删 hmck 装出来的二进制、skill、预下载缓存和更新时间记录，PATH 上别人装的不动（会说明），自定义工具的配置留给 `hmck rm`
+
+### 变更
+
+- 版本号解析不再取 `<tool> version` 输出的最后一个字段，改为找第一个像版本号的词——glab 的输出后面跟着 commit 号，取最后一个会拿错
+- Windows 上删不掉正在运行的二进制，就先改名成 `.old`：进程退出后不再占用文件名，重新安装也不受影响（`.old` 留在原目录，可以手动删）
+
+### 修复
+
+- release 说明里任意级别的标题都算小节标题：glab 的说明整段包在 `## Changelog` 下面，之前会把它当成第一句说明显示在卡片上
+
 ## [0.9.0] - 2026-11-19
 
 ### 新增
