@@ -15,6 +15,7 @@
 | --- | --- |
 | [kube-token](https://github.com/hongmengchen/kube-token) | 粘贴新 token 替换 kubeconfig 里的旧值 |
 | [npm-token](https://github.com/hongmengchen/npm-token) | 检查并更新 `~/.npmrc` 里的 registry token |
+| [argo-token](https://github.com/hongmengchen/argo-token) | 配置 Argo CD 服务器和只读 token |
 | [glab](https://gitlab.com/gitlab-org/cli) | GitLab 官方 CLI：MR、issue、流水线都在终端里；装了就能看登录状态 |
 | [kubectl](https://kubernetes.io/docs/reference/kubectl/) | Kubernetes 命令行（`dl.k8s.io` 发版）：看当前 context、API server、连不连得上 |
 | [argocd](https://github.com/argoproj/argo-cd) | Argo CD 命令行：应用、同步、回滚都在终端里 |
@@ -22,50 +23,51 @@
 
 能装什么由一份线上目录说了算：hmck 仓库里的 [`docs/catalog.json`](docs/catalog.json)，加个工具只改这份 JSON，不用发新版 hmck。TUI 里按 `n` 打开[工具目录](#工具目录)，挑一个 `enter` 就加入并开装；目录里没有的，还能现场按仓库添加。
 
+列表按三栏排：**官方 CLI**（glab、kubectl、argocd，hmck 帮你看版本、装、升级）、**自己的工具**（kube-token、npm-token、argo-token、hmck，除了版本还能直接打开用）、**自己加的**（本机 `hmck add` 进来的）。`hmck list --json` 的每条也带 `kind`（`official` / `own` / `added`）。
+
 ```
 $ hmck
-▀█▄           hmck  我的命令行小工具
-  ▀█▄         4 个工具 · 2 个可更新 · 检查于 09:41:02
-    ▀█▄       a 自动下载最新版 [关]    A 自动安装最新版 [关]
-    ▄█▀
-  ▄█▀
-▄█▀    █████
+▜▙      hmck  我的命令行小工具
+  ▌     7 个工具 · 2 个可更新
+▟▛ ▗▄▖  a 自动下载最新版 [开]    A 自动安装最新版 [开]
 
-▌    ██████
-▌  ▄█▀    ▀█▄   kube-token  ✓ 0.8.0                                                        10 小时前更新
-▌ ██   ▄▄   ██  粘贴新 token 替换 kubeconfig 里的旧值                    /Users/me/.local/bin/kube-token
-▌ ██   ▀▀   ██  hongmengchen/kube-token  ·  v0.8.0  Vault 登录缓存：第一次按 v 输入密码…
-▌  ▀█▄    ▄█▀
-▌    ██████
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────
-│    ▗▛▀▀▜▖
-│    ▐▌  ▐▌     npm-token   ✓ 0.5.0                                                         3 小时前更新
-│   ▗▟▙▄▄▟▙▖    检查并更新 ~/.npmrc 里的 registry token                   /Users/me/.local/bin/npm-token
-│   ████████    hongmengchen/npm-token  ·  v0.5.0  npm-token 有了自己的标志…
-│   ███▌▐███
-│   ▜██████▛
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────
-│  ▗▙      ▟▖
-│ ▗██▌    ▐██▖  glab        ↑ 1.130.0 → 1.131.0                                               3 天前更新
-│ ▄▀▀██████▀▀▄  GitLab 命令行：MR、issue、流水线都在终端里                     /Users/me/.local/bin/glab
-│ ▜█▙▄▀▜▛▀▄▟█▛  gitlab-org/cli  ·  已登录 alice  ·  v1.131.0  新增 glab attestation…
-│  ▝▀█▀▘▘▀█▀▘
-│     ▀▜▛▀
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ▀█▄
-│   ▀█▄         hmck        ↑ 0.9.0 → 0.10.3                                                    刚刚更新
-│     ▀█▄       管理这些命令行小工具，包括它自己                               /Users/me/.local/bin/hmck
-│     ▄█▀       hongmengchen/hmck  ·  v0.10.3  所有工具都能卸载，包括它自己…
-│   ▄█▀
-│ ▄█▀    █████
+  官方 CLI · 3 个
+▌ ▗▙  ▟▖  glab        ↑ 1.130.0 → 1.131.0                                             3 天前更新
+▌ ▟▛  ▜▙     GitLab 命令行：MR、issue、流水线都在终端里                        ~/.local/bin/glab
+▌ ▝▀  ▀▘  gitlab-org/cli
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+│ ▌▌▛▌▛▘  kubectl     ✓ 1.37.2                                                        1 天前更新
+│ ▛▖▛▌▀▌     Kubernetes 命令行：Pod、日志、集群都在终端里                   ~/.local/bin/kubectl
+│ ▘▘▀▘▀▘  kubernetes/kubernetes
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+│ ▗▟▛▜▙▖  argocd      ✓ 3.6.2                                                       2 小时前更新
+│   ▙▟       Argo CD 命令行：应用、同步、回滚都在终端里                      ~/.local/bin/argocd
+│ ▝▜▌▌▛▘  argoproj/argo-cd
+
+  自己的工具 · 4 个
+│  ▟▀▀▙   kube-token  ✓ 0.8.0                                                      10 小时前更新
+│ ▐▌  ▐▌     粘贴新 token 替换 kubeconfig 里的旧值                       ~/.local/bin/kube-token
+│  ▜▄▄▛   hongmengchen/kube-token
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+│   ▛▜    npm-token   ✓ 0.5.0                                                       3 小时前更新
+│   ▛▜       检查并更新 ~/.npmrc 里的 registry token                      ~/.local/bin/npm-token
+│         hongmengchen/npm-token
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+│ ▗▄      argo-token  ✓ 0.1.0                                                       1 分钟前更新
+│ ▌▐▄▄▄▖     配置 Argo CD 服务器和只读 token                             ~/.local/bin/argo-token
+│ ▝▀  ▘▘  hongmengchen/argo-token
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+│ ▜▙      hmck        ↑ 0.10.6 → 0.10.7                                             1 分钟前更新
+│   ▌        管理这些命令行小工具，包括它自己                                  ~/.local/bin/hmck
+│ ▟▛ ▗▄▖  hongmengchen/hmck
 
   ↑↓ 选择  ·  enter 启动/安装  ·  n 工具目录  ·  u 升级  ·  U 全部更新  ·  i 信息  ·  g 更新日志
   d 卸载  ·  s 装 skill  ·  r 重新检查  ·  q 退出
 ```
 
-打开后先列出本地工具（版本、安装位置），最新版在后台查询；查到哪个就刷新哪张卡片，查询期间那一格显示转圈，不用对着一个空白的加载页等网络。每个工具占一块，中间用淡线隔开：左边是该工具自己的招牌，右边三行分别是「名称和版本」「它干什么 / 装在哪」「仓库和最近一版改了什么」。
+打开后先列出本地工具（版本、安装位置），最新版在后台查询；查到哪个就刷新哪张卡片，查询期间那一格显示转圈，不用对着一个空白的加载页等网络。每一栏有个标题，栏内每个工具占一块，中间用淡线隔开：左边是该工具自己的招牌，右边三行分别是「名称和版本」「它干什么 / 装在哪」「仓库和最近一版改了什么」。
 
-招牌是 [`docs/logos`](docs/logos) 里各工具自己的 SVG（glab 用的是 GitLab 官方 press kit 的狸猫）编进程序后，运行时光栅成 12×6 个像素、再折成 6 列 × 3 行的象限字符（`▘▀▖▌▛█` 这些实心方块），颜色取 SVG 里的原色：hmck 是绿色箭头（`>` 当提示符，右边一条下划线，就是 `hmck` 三个字母里那个横）、kube-token 是蓝色六边形框里一颗核心、npm-token 是红挂锁、argocd 是橙色圆角块里一个白 A。造型是照着终端网格手摆的像素画，不是把普通矢量图缩下来——缩下来的图在这个尺寸上会糊成一块。终端颜色少的时候由 lipgloss 自己降级，不依赖图片文件、字体或网络；自定义工具和读不出 SVG 的工具，还是退回方块字首字母。
+招牌是 [`docs/logos`](docs/logos) 里各工具自己的 SVG（glab 用的是 GitLab 官方 press kit 的狸猫）编进程序后，运行时光栅成 12×6 个像素、再折成 6 列 × 3 行的象限字符（`▘▀▖▌▛█` 这些实心方块），颜色取 SVG 里的原色：hmck 是绿色箭头（`>` 当提示符，右边一条下划线，就是 `hmck` 三个字母里那个横）、kube-token 是蓝色六边形框里一颗核心、npm-token 是红挂锁、argo-token 是琥珀色的钥匙、argocd 是橙色圆角块里一个白 A。造型是照着终端网格手摆的像素画，不是把普通矢量图缩下来——缩下来的图在这个尺寸上会糊成一块。终端颜色少的时候由 lipgloss 自己降级，不依赖图片文件、字体或网络；自定义工具和读不出 SVG 的工具，还是退回方块字首字母。
 
 第三行的更新日志预览是启动时顺手从各仓库的 `CHANGELOG.md` 抓回来的（没有就退到 release notes），失败也不影响列表。自定义工具用同款方框放名字首字母。
 

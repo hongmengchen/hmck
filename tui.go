@@ -27,6 +27,8 @@ var (
 	styleVerNew  = lipgloss.NewStyle().Foreground(pal.Warn).Bold(true)
 	stylePath    = lipgloss.NewStyle().Foreground(pal.Dim)
 	styleRule    = lipgloss.NewStyle().Foreground(pal.Line)
+	// 分栏标题：比卡片淡，但加粗，扫一眼知道下面这一栏是什么
+	styleGroup = lipgloss.NewStyle().Foreground(pal.Text).Bold(true)
 
 	// 进度条：填充用主色，底槽用卡片分隔线那种深色，整条看着是实的，不是一串点
 	styleBarFill  = lipgloss.NewStyle().Foreground(pal.Accent)
@@ -1513,11 +1515,27 @@ func (m tuiModel) viewList() string {
 	}
 	b.WriteString("\n")
 
+	// 分栏：官方 CLI / 自己的工具 / 自己加的；标题带上这一栏有几个
+	counts := map[string]int{}
+	for _, st := range m.states {
+		counts[toolKind(st.Tool)]++
+	}
+	lastKind := ""
 	for i, st := range m.states {
+		kind := toolKind(st.Tool)
+		if kind != lastKind {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString("  " + styleGroup.Render(kindTitle(kind)) +
+				styles.Dim.Render(fmt.Sprintf(" · %d 个", counts[kind])))
+			b.WriteString("\n")
+			lastKind = kind
+		}
 		b.WriteString(m.renderCard(st, i == m.cursor, cols))
 		b.WriteString("\n")
-		if i < len(m.states)-1 {
-			// 工具之间用一条淡线隔开，卡片各占一块，扫一眼就能分开
+		// 同一栏里工具之间用一条淡线隔开；换栏时靠标题和空行分，不再画线
+		if i < len(m.states)-1 && toolKind(m.states[i+1].Tool) == kind {
 			b.WriteString("  " + styleRule.Render(strings.Repeat("─", w)))
 			b.WriteString("\n")
 		}

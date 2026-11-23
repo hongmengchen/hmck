@@ -23,6 +23,16 @@
       "post_install": ["skill", "--quiet"]
     },
     {
+      "key": "argo-token",
+      "name": "argo-token",
+      "desc": "配置 Argo CD 服务器和只读 token",
+      "repo": "hongmengchen/argo-token",
+      "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64", "windows/amd64", "windows/arm64"],
+      "checksums": true,
+      "skill": true,
+      "post_install": ["skill", "--quiet"]
+    },
+    {
       "key": "glab",
       "name": "glab",
       "desc": "GitLab 命令行：MR、issue、流水线都在终端里",

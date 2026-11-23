@@ -14,7 +14,7 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.10.6"
+var version = "0.10.7"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -121,6 +121,7 @@ type listItem struct {
 	Upgradable bool   `json:"upgradable"`
 	UpdatedAt  string `json:"updated_at,omitempty"`
 	Custom     bool   `json:"custom,omitempty"`
+	Kind       string `json:"kind,omitempty"` // official / own / added：列表里归哪一栏
 	Error      string `json:"error,omitempty"`
 	InUse      string `json:"in_use,omitempty"`  // 本机上实际能跑的那份（hmck 没装时是 PATH 上别人装的）
 	Foreign    bool   `json:"foreign,omitempty"` // in_use 不归 hmck 管（brew / apt 装的）
@@ -181,7 +182,19 @@ func runList(args []string) int {
 	fmt.Printf("%s  %s  %s  %s\n",
 		dim(theme.Pad("NAME", w1), color), dim(theme.Pad("已安装", w2), color),
 		dim(theme.Pad("最新", w3), color), dim("状态", color))
+	groupCount := map[string]int{}
+	for _, st := range states {
+		groupCount[toolKind(st.Tool)]++
+	}
+	lastKind := ""
 	for i, r := range rows {
+		if k := toolKind(states[i].Tool); k != lastKind {
+			if i > 0 {
+				fmt.Println()
+			}
+			fmt.Printf("%s %s\n", kindTitle(k), dim(fmt.Sprintf("· %d 个", groupCount[k]), color))
+			lastKind = k
+		}
 		_, kind := states[i].Status()
 		fmt.Printf("%s  %s  %s  %s\n",
 			theme.Pad(r.name, w1), theme.Pad(r.installed, w2), theme.Pad(r.latest, w3),
@@ -210,7 +223,7 @@ func toListItem(st toolState) listItem {
 		Key: st.Tool.Key, Name: st.Tool.Name,
 		Installed: st.Installed, Latest: st.Latest, Path: shortenHome(st.Path),
 		Status: label, Upgradable: st.Behind(), UpdatedAt: updated,
-		Custom: st.Tool.Custom, Error: st.CheckErr,
+		Custom: st.Tool.Custom, Kind: toolKind(st.Tool), Error: st.CheckErr,
 		InUse: shortenHome(inUse), Foreign: foreign,
 	}
 }

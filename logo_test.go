@@ -10,7 +10,7 @@ import (
 // logoWidth 格宽、logoRowsN 行高，每一行都有笔画，一幅图一个样
 func TestBuiltinLogosRenderFromSVG(t *testing.T) {
 	seen := map[string][]logoCell{}
-	for _, key := range []string{"hmck", "kube-token", "npm-token", "glab", "kubectl"} {
+	for _, key := range []string{"hmck", "kube-token", "npm-token", "argo-token", "glab", "kubectl", "argocd"} {
 		raw, err := logoSVGs.ReadFile("docs/logos/" + key + ".svg")
 		if err != nil {
 			t.Fatalf("%s 没有 SVG: %v", key, err)

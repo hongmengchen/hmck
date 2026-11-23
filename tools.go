@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -32,11 +33,56 @@ type tool struct {
 	PostInstall   []string `json:"post_install,omitempty"` // 装完/升级后要跑的子命令（忽略失败）
 	VersionArgs   []string `json:"version_args,omitempty"` // 问版本号的子命令，默认 version；kubectl 用 version --client
 
+	// Kind 是列表里的归类：official（别人的官方 CLI，hmck 帮你看版本、装、升级）
+	// 或 own（我们自己的小工具，除了版本还能直接打开用）；本机自己 add 的另算一栏
+	Kind string `json:"-"`
+
 	OwnDir       bool   `json:"-"` // 只管理 hmck 目录里的那一份，不接管 PATH 上别人装的副本（如 glab、kubectl）
 	Status       bool   `json:"-"` // hmck 能读出它自己的状态（登录 / 集群）
 	StatusSource string `json:"-"` // 状态怎么读：glab（默认，看登录）/ kubectl（看集群）
 	Custom       bool   `json:"-"` // 来自本机配置，不是内置
 	Self         bool   `json:"-"` // hmck 自己：路径取当前可执行文件，版本用内置的
+}
+
+// 列表里的三栏：别人的官方 CLI、我们自己的小工具、本机自己加的工具。
+// 前两类写在内置注册表里，第三类来自本机配置（`hmck add`）。
+const (
+	kindOfficial = "official"
+	kindOwn      = "own"
+	kindAdded    = "added"
+)
+
+func toolKind(t tool) string {
+	if t.Custom {
+		return kindAdded
+	}
+	if t.Kind != "" {
+		return t.Kind
+	}
+	return kindOfficial
+}
+
+func kindTitle(kind string) string {
+	switch kind {
+	case kindOwn:
+		return "自己的工具"
+	case kindAdded:
+		return "自己加的"
+	default:
+		return "官方 CLI"
+	}
+}
+
+// kindRank 决定列表先后：官方 CLI 在前，自家工具在后，本机加的在最后
+func kindRank(t tool) int {
+	switch toolKind(t) {
+	case kindOfficial:
+		return 0
+	case kindOwn:
+		return 1
+	default:
+		return 2
+	}
 }
 
 var registry = []tool{
@@ -46,6 +92,7 @@ var registry = []tool{
 		Desc:   "粘贴新 token 替换 kubeconfig 里的旧值",
 		Repo:   "hongmengchen/kube-token",
 		Binary: "kube-token",
+		Kind:   kindOwn,
 		Platforms: []string{
 			"darwin/amd64", "darwin/arm64",
 			"linux/amd64", "linux/arm64",
@@ -61,6 +108,25 @@ var registry = []tool{
 		Desc:   "检查并更新 ~/.npmrc 里的 registry token",
 		Repo:   "hongmengchen/npm-token",
 		Binary: "npm-token",
+		Kind:   kindOwn,
+		Platforms: []string{
+			"darwin/amd64", "darwin/arm64",
+			"linux/amd64", "linux/arm64",
+			"windows/amd64", "windows/arm64",
+		},
+		Checksums:   true,
+		Skill:       true,
+		PostInstall: []string{"skill", "--quiet"},
+	},
+	{
+		// 自家的 Argo CD token 配置 TUI：跟 kube-token / npm-token 一样，
+		// 资产是 <key>_<goos>_<goarch>，旁边配 checksums.txt，自己带 skill。
+		Key:    "argo-token",
+		Name:   "argo-token",
+		Desc:   "配置 Argo CD 服务器和只读 token",
+		Repo:   "hongmengchen/argo-token",
+		Binary: "argo-token",
+		Kind:   kindOwn,
 		Platforms: []string{
 			"darwin/amd64", "darwin/arm64",
 			"linux/amd64", "linux/arm64",
@@ -88,6 +154,7 @@ var registry = []tool{
 			"windows/amd64", "windows/arm64", "windows/386",
 		},
 		Checksums: true,
+		Kind:      kindOfficial,
 		OwnDir:    true,
 		Status:    true,
 	},
@@ -109,6 +176,7 @@ var registry = []tool{
 			"windows/amd64", "windows/arm64",
 		},
 		Checksums:    true,
+		Kind:         kindOfficial,
 		OwnDir:       true,
 		Status:       true,
 		StatusSource: "kubectl",
@@ -132,6 +200,7 @@ var registry = []tool{
 		Checksums:     true,
 		ChecksumsFile: "cli_checksums.txt",
 		VersionArgs:   []string{"version", "--client"},
+		Kind:          kindOfficial,
 		// 跟 glab / kubectl 一样：brew 装的那份不接管、不覆盖，
 		// hmck 只管自己目录里的这一份（hmck install argocd 显式装）
 		OwnDir: true,
@@ -143,6 +212,7 @@ var registry = []tool{
 		Desc:   "管理这些命令行小工具，包括它自己",
 		Repo:   "hongmengchen/hmck",
 		Binary: "hmck",
+		Kind:   kindOwn,
 		Platforms: []string{
 			"darwin/amd64", "darwin/arm64",
 			"linux/amd64", "linux/arm64",
@@ -172,6 +242,8 @@ func allTools() ([]tool, error) {
 		seen[strings.ToLower(t.Key)] = true
 		out = append(out, t)
 	}
+	// 分栏顺序就是列表顺序：注册表里的先后在同栏内保留，不按字母重排
+	sort.SliceStable(out, func(i, j int) bool { return kindRank(out[i]) < kindRank(out[j]) })
 	return out, nil
 }
 

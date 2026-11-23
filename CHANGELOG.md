@@ -2,6 +2,15 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.10.7] - 2026-11-23
+
+### 新增
+
+- 列表分三栏：**官方 CLI**（glab、kubectl、argocd 这些别人的命令行，hmck 帮你看版本、装、升级）、**自己的工具**（kube-token、npm-token、argo-token、hmck，除了版本还能直接打开用）、**自己加的**（本机 `hmck add` 的）。TUI 里每栏一个标题带个数，同一栏内保留注册表顺序；`hmck list` 文本输出同样分栏，`--json` 每条多一个 `kind`（`official` / `own` / `added`）
+- 内置 argo-token（配置 Argo CD 服务器和只读 token 的 TUI）：跟 kube-token 一样在 GitHub 发版，资产是 `argo-token_<os>_<arch>` 配 `checksums.txt`，装完自动装 skill；之前只能本机 `hmck add`，现在新机器上直接 `hmck install argo-token`
+- 工具目录里加上 argo-token，TUI 的工具目录页也能直接加
+- argo-token 的招牌：琥珀色的钥匙
+
 ## [0.10.6] - 2026-11-23
 
 ### 新增

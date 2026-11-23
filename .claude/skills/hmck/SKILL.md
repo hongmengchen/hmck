@@ -1,11 +1,14 @@
 ---
 name: hmck
-description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、glab、kubectl、argocd 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态和集群连通性、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「卸载某个工具 / 卸载 hmck」「自动更新」「新增一个工具让 hmck 管理」「hmck 都能装什么 / 工具目录」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
+description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、argo-token、glab、kubectl、argocd 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态和集群连通性、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「卸载某个工具 / 卸载 hmck」「自动更新」「新增一个工具让 hmck 管理」「hmck 都能装什么 / 工具目录」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
 ---
 
 # hmck
 
-`hmck` 是这台机器上的工具管理器：内置 kube-token、npm-token、glab、kubectl、argocd 以及它自己，也能把以后的新工具加进来。
+`hmck` 是这台机器上的工具管理器：内置 kube-token、npm-token、argo-token、glab、kubectl、argocd 以及它自己，也能把以后的新工具加进来。
+列表按三栏排：**官方 CLI**（glab、kubectl、argocd，hmck 帮你看版本、装、升级）、
+**自己的工具**（kube-token、npm-token、argo-token、hmck，除了版本还能直接打开用）、
+**自己加的**（本机 `hmck add` 进来的）；`hmck list --json` 每条带 `kind`（`official` / `own` / `added`）。
 它知道每个工具的已安装版本、最新版本、安装路径，能安装、升级、直接启动、卸载，
 还会顺手把各工具的 agent skill 刷新到全局目录；对 glab 这类工具能读出登录状态，对 kubectl 能读出当前 context 和集群连通性。
 
@@ -18,7 +21,8 @@ CLI 的每个动作都有对应命令，输出也可以 `--json`。
    `hmck info glab` 只跑 `glab auth status`，输出里也只有主机、账号、凭证来源，不会打印 token；
    `hmck info kubectl` 只跑 `kubectl config view --minify` 和 `kubectl version -o json`，不读 kubeconfig 里的证书和 token。
 2. **不要擅自改用户的真实配置。** `~/.npmrc`、`~/.kube/config` 的写入交给 kube-token /
-   npm-token 自己做（它们会自动备份、复验、必要时还原），agent 不要手改文件。
+   npm-token 自己做（它们会自动备份、复验、必要时还原），agent 不要手改文件；
+   argo-token 的 token 在 `~/.argocd/token`（0600），配置和 token 都交给它的 TUI / `set` 写，agent 不要 `cat`。
 3. **升级和卸载只走 hmck。** 不要用 `go install`、手动下载二进制或改 PATH 来「修好」某个工具，
    也不要手动 `rm` 来卸载；`hmck upgrade` 会校验 checksum 并原子替换，`hmck uninstall` 只删 hmck 装出来的那份，
    且要敲工具名确认——非交互环境只有用户明确同意后才加 `--yes`。
@@ -56,7 +60,8 @@ hmck 只跑 `glab auth status`、`kubectl config view --minify`、`kubectl versi
   "path": "~/.local/bin/npm-token",
   "status": "可升级 0.1.1",
   "upgradable": true,
-  "updated_at": "2026-11-15T21:12:03+08:00"
+  "updated_at": "2026-11-15T21:12:03+08:00",
+  "kind": "own"
 }
 ```
 
@@ -92,7 +97,8 @@ hmck run npm-token --help       # 直接启动工具，后面的参数原样传�
 - 装完/升级完会跑工具声明的 `post_install`（目前是 `skill --quiet`），agent 的说明跟着更新。
 - `hmck run` 会透传退出码，脚本里可以直接用。
 
-TUI（只有用户自己在终端里用）：`↑↓` 选择，`enter` 启动（没装则安装；选到 hmck 自己是升级），
+TUI（只有用户自己在终端里用）：列表按「官方 CLI / 自己的工具 / 自己加的」三栏排，每栏一个标题带个数；
+`↑↓` 选择（跨栏照常选），`enter` 启动（没装则安装；选到 hmck 自己是升级），
 `n` 打开工具目录（每行一个 hmck 能装的工具，右边是本机状态：版本号 / 未添加 / 未安装 / 本平台没有，
 `enter` 加入并安装，已加入的直接装或升级，`r` 重新拉目录；目录里按 `a` 才是按仓库新增，填仓库、key、说明），
 `u` 升级选中的，`U` 一键升级所有可升级的，`i` 看信息页，`g` 看更新日志，`d` 卸载，
@@ -101,7 +107,7 @@ TUI（只有用户自己在终端里用）：`↑↓` 选择，`enter` 启动（
 `○` 未安装、`!` 查不到最新版或没有对应平台的发布。第一行右边是上次版本更新时间。
 每张卡片左边是该工具自己的招牌：`docs/logos/*.svg`（glab 是 GitLab 官方 press kit 的狸猫）
 编进程序，运行时光栅成 12×6 像素、折成 6 列 × 3 行的象限字符（`▘▀▖▌█` 这类实心方块），
-颜色取 SVG 原色；造型是照终端网格手摆的像素画（画布 24 单位宽、24 单位高，一个取样点
+颜色取 SVG 原色（argo-token 是琥珀色钥匙）；造型是照终端网格手摆的像素画（画布 24 单位宽、24 单位高，一个取样点
 2 单位宽 4 单位高），不是缩小的普通矢量图。自定义工具没有 SVG，退回方块字首字母。招牌右边三行依次是名称和版本、作用 / 装在哪、仓库 / 登录状态 / 最近一版
 的第一条说明（启动时抓 `CHANGELOG.md`，失败就只显示仓库名）。
 
@@ -224,7 +230,9 @@ hmck rm my-tool                      # 只删自定义工具
 **备选：写进内置列表。** 在 `tools.go` 的 `registry` 加一条，发新版 hmck。
 内置工具 key 优先于自定义配置，不能被 `hmck add` 覆盖、也不能 `hmck rm`。
 发布在 GitLab 的加 `Host: "gitlab"`；资产名不规范用 `Asset` 模板、压缩包开 `Archive`；
-只接管自己装的那份用 `OwnDir`；能读登录状态的用 `Status`（目前只有 glab）。
+只接管自己装的那份用 `OwnDir`；能读登录状态的用 `Status`（目前只有 glab）；
+`Kind` 决定列表归到哪一栏：别人的官方 CLI 写 `kindOfficial`，自己的小工具写 `kindOwn`
+（kube-token / npm-token / argo-token / hmck），本机 `hmck add` 的自动算 `kindAdded`。
 
 ## 5. 在本仓库里改代码时
 
