@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,7 @@ const (
 	infoPage
 	confirmUninstall
 	addTool
+	catalog
 )
 
 type resultLine struct {
@@ -96,6 +98,20 @@ type tuiModel struct {
 	exitOnResult bool          // 卸载了 hmck 自己：结果页按任意键退出
 
 	add addView // 正在填「新增工具」的表单
+
+	cat    catalogView // 线上工具目录
+	catGen int         // 目录也认代次，连按 r 不会让旧结果盖掉新的
+}
+
+// catalogView 是工具目录页：线上目录里的工具 + 本机自己加的自定义工具
+type catalogView struct {
+	rows    []tool // 线上目录那份；本机自定义的拼在 catalogRows 里
+	cursor  int
+	loaded  bool // 至少试过读一次
+	loading bool
+	source  string // online / bundled
+	err     string // 线上没读到的原因，或操作时的一句提示
+	skipped int    // 目录里读不懂、跳过的条数
 }
 
 // addView 是新增工具的表单：仓库必填，名字和说明可以不填。
@@ -431,6 +447,37 @@ func addToolCmd(t tool) tea.Cmd {
 	}
 }
 
+// catalogMsg 是工具目录读回来的结果；gen 不对就说明用户又按了 r，旧结果丢掉
+type catalogMsg struct {
+	gen int
+	res catalogResult
+}
+
+func catalogFetchCmd(gen int) tea.Cmd {
+	return func() tea.Msg { return catalogMsg{gen: gen, res: loadCatalog()} }
+}
+
+// catalogAddMsg 是从目录里挑中一个还没加入的工具：先写进本机配置，再开装
+type catalogAddMsg struct {
+	t   tool
+	err error
+}
+
+// catalogAddCmd 直接用目录里写好的平台和校验方式入册，不再去问一次发布：
+// 目录是维护的人挑过的，按它写的装才对得上
+func catalogAddCmd(t tool) tea.Cmd {
+	return func() tea.Msg {
+		t.Custom = true
+		if err := normalizeCustom(&t); err != nil {
+			return catalogAddMsg{err: err}
+		}
+		if _, err := addCustomTool(t, false); err != nil {
+			return catalogAddMsg{err: err}
+		}
+		return catalogAddMsg{t: t}
+	}
+}
+
 func uninstallCmd(t tool, keepSkill bool) tea.Cmd {
 	return func() tea.Msg {
 		return uninstallDoneMsg{res: uninstallTool(t, keepSkill)}
@@ -641,6 +688,33 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.note.entries = msg.entries
 		}
 
+	case catalogMsg:
+		if msg.gen != m.catGen {
+			return m, nil
+		}
+		m.cat.loading = false
+		m.cat.loaded = true
+		m.cat.rows = msg.res.tools
+		m.cat.source = msg.res.source
+		m.cat.err = msg.res.err
+		m.cat.skipped = msg.res.skipped
+		if n := len(m.catalogRows()); m.cat.cursor >= n {
+			m.cat.cursor = max(0, n-1)
+		}
+
+	case catalogAddMsg:
+		if msg.err != nil {
+			m.state = catalog
+			m.cat.err = msg.err.Error()
+			return m, nil
+		}
+		st := toolState{Tool: msg.t}
+		m.states = append(m.states, st)
+		m.cursor = len(m.states) - 1
+		m.cat.err = ""
+		// 挑中就是为了装：写进配置后直接开始下载
+		return m.startInstall(st)
+
 	case addToolMsg:
 		if msg.err != nil {
 			// 没写进配置：回到表单，把填过的留着，改一下再来
@@ -808,9 +882,11 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.workText = "正在安装 agent skill…"
 			return m, tea.Batch(m.spin.Tick, skillCmd())
 		case "n":
-			m.state = addTool
-			m.add = addView{}
-			return m, nil
+			m.state = catalog
+			if m.cat.loaded || m.cat.loading {
+				return m, nil
+			}
+			return m.startCatalog()
 		case "r":
 			return m.refresh()
 		case "q", "esc":
@@ -889,6 +965,36 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.add.insert(string(k.Runes))
 			m.add.err = ""
 			return m, nil
+		}
+		return m, nil
+
+	case catalog:
+		switch k.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		case "esc":
+			m.state = list
+			return m, nil
+		case "up", "k":
+			if m.cat.cursor > 0 {
+				m.cat.cursor--
+			}
+		case "down", "j":
+			if m.cat.cursor < len(m.catalogRows())-1 {
+				m.cat.cursor++
+			}
+		case "home":
+			m.cat.cursor = 0
+		case "end":
+			m.cat.cursor = max(0, len(m.catalogRows())-1)
+		case "a":
+			// 目录里没有的，走原来的按仓库添加
+			m.state = addTool
+			m.add = addView{}
+		case "r":
+			return m.startCatalog()
+		case "enter":
+			return m.catalogInstall()
 		}
 		return m, nil
 
@@ -984,7 +1090,104 @@ func (m tuiModel) animating() bool {
 	if m.state == infoPage {
 		return !m.localReady || len(m.pending) > 0 // 信息页上「读取中」的圈也得转
 	}
+	if m.state == catalog {
+		return m.cat.loading
+	}
 	return m.state == list && (!m.localReady || len(m.pending) > 0)
+}
+
+// startCatalog 去读一遍线上目录。读不到会退回程序自带的那份，页面上注明
+func (m tuiModel) startCatalog() (tea.Model, tea.Cmd) {
+	m.cat.loading = true
+	m.cat.err = ""
+	m.catGen++
+	return m, tea.Batch(m.spin.Tick, catalogFetchCmd(m.catGen))
+}
+
+// catalogRows 是目录页上看到的全部工具：线上目录那份在前，
+// 本机自己 hmck add 的不在目录里的补在后面，别让人找不到自己加过的
+func (m tuiModel) catalogRows() []tool {
+	rows := append([]tool(nil), m.cat.rows...)
+	seen := make(map[string]bool, len(rows))
+	for _, t := range rows {
+		seen[strings.ToLower(t.Key)] = true
+	}
+	for _, st := range m.states {
+		if !seen[strings.ToLower(st.Tool.Key)] {
+			rows = append(rows, st.Tool)
+		}
+	}
+	return rows
+}
+
+func (m tuiModel) stateOfKey(key string) (toolState, bool) {
+	for _, st := range m.states {
+		if strings.EqualFold(st.Tool.Key, key) {
+			return st, true
+		}
+	}
+	return toolState{}, false
+}
+
+// catalogInstall 是目录页上的 enter：已经加入的直接装/升级，
+// 还没加入的先写进本机配置再装；本平台没包的提前说清楚，不白下一趟
+func (m tuiModel) catalogInstall() (tea.Model, tea.Cmd) {
+	rows := m.catalogRows()
+	if len(rows) == 0 {
+		return m, nil
+	}
+	if m.cat.cursor >= len(rows) {
+		m.cat.cursor = len(rows) - 1
+	}
+	t := rows[m.cat.cursor]
+	if !platformSupported(t) {
+		m.state = result
+		m.resultLines = []resultLine{{
+			text: t.Key + " 没有 " + runtime.GOOS + "/" + runtime.GOARCH + " 的发布",
+			ok:   false,
+		}}
+		return m, nil
+	}
+	if st, ok := m.stateOfKey(t.Key); ok {
+		if !m.localReady {
+			m.cat.err = "本机还在检查，稍等一下再按 enter"
+			return m, nil
+		}
+		return m.startInstall(st)
+	}
+	m.state = working
+	m.workText = "正在加入 " + t.Key + "…"
+	return m, tea.Batch(m.spin.Tick, catalogAddCmd(t))
+}
+
+// catalogStatus 说清目录里这一行现在什么情况：装在哪、能不能升、还是没加进来
+func (m tuiModel) catalogStatus(t tool) (string, string) {
+	if !platformSupported(t) {
+		return "本平台没有", "missing"
+	}
+	st, ok := m.stateOfKey(t.Key)
+	if !ok {
+		return "未添加", "missing"
+	}
+	if !m.localReady {
+		return "检查中…", "warn"
+	}
+	if st.Behind() {
+		return st.Installed + " → " + st.Latest, "warn"
+	}
+	if st.Missing() && len(st.Foreign) > 0 {
+		if st.ForeignVer != "" {
+			return "PATH 上 " + st.ForeignVer, "warn"
+		}
+		return "PATH 上已有一份", "warn"
+	}
+	if st.Missing() {
+		return "未安装", "missing"
+	}
+	if st.CheckErr != "" {
+		return st.Installed + "（没查到新版）", "warn"
+	}
+	return st.Installed, "ok"
 }
 
 // submitAdd 收起新增表单：和 `hmck add <repo>` 走同一条路——先落进本机配置，
@@ -1246,6 +1449,8 @@ func (m tuiModel) View() string {
 		body = m.viewConfirm()
 	case addTool:
 		body = m.viewAdd()
+	case catalog:
+		body = m.viewCatalog()
 	}
 	return "\n" + body + "\n"
 }
@@ -1318,7 +1523,7 @@ func (m tuiModel) viewList() string {
 		}
 	}
 	b.WriteString("\n")
-	b.WriteString(m.viewHints("↑↓", "选择", "enter", "启动/安装", "n", "新工具", "u", "升级", "U", "全部更新",
+	b.WriteString(m.viewHints("↑↓", "选择", "enter", "启动/安装", "n", "工具目录", "u", "升级", "U", "全部更新",
 		"i", "信息", "g", "更新日志", "d", "卸载", "s", "装 skill", "r", "重新检查", "q", "退出"))
 	return b.String()
 }
@@ -1789,6 +1994,105 @@ func (m tuiModel) viewConfirm() string {
 
 	b.WriteString("\n")
 	b.WriteString(m.viewHints("enter", "确认卸载", "esc", "算了", "ctrl+c", "退出"))
+	return b.String()
+}
+
+// viewCatalog 是工具目录页：一行一个工具，右边是它在本机的状态。
+// 选中那一行下面补出仓库和平台，够判断要不要装
+func (m tuiModel) viewCatalog() string {
+	w := m.contentWidth()
+	rows := m.catalogRows()
+	added := 0
+	for _, t := range rows {
+		if _, ok := m.stateOfKey(t.Key); ok {
+			added++
+		}
+	}
+	source := "在线目录"
+	if m.cat.source == "bundled" {
+		source = "随程序内置的一份"
+	}
+
+	var b strings.Builder
+	b.WriteString(m.withLogo(
+		styles.Title.Render("工具目录")+styles.Dim.Render("  线上维护，挑着装"),
+		styles.Dim.Render(fmt.Sprintf("%d 个工具 · 已加入 %d 个 · %s", len(rows), added, source)),
+		styles.Dim.Render("enter 安装/加入 · a 按仓库添加 · r 刷新目录"),
+	))
+	b.WriteString("\n")
+
+	if m.cat.loading && !m.cat.loaded {
+		b.WriteString("  " + m.spin.View() + "  " + styles.Dim.Render("正在读取在线目录…") + "\n\n")
+		b.WriteString(m.viewHints("esc", "返回", "ctrl+c", "退出"))
+		return b.String()
+	}
+	if m.cat.err != "" && len(rows) > 0 {
+		b.WriteString("  " + styles.Warn.Render(theme.Truncate(m.cat.err, max(w-2, 8))) + "\n")
+	}
+	if m.cat.skipped > 0 {
+		b.WriteString("  " + styles.Dim.Render(fmt.Sprintf("目录里有 %d 条读不懂，已跳过", m.cat.skipped)) + "\n")
+	}
+	if len(rows) == 0 {
+		b.WriteString("  " + styles.Warn.Render(theme.Truncate("目录读不到："+m.cat.err, max(w-2, 8))) + "\n\n")
+		b.WriteString(m.viewHints("a", "按仓库添加", "r", "重试", "esc", "返回"))
+		return b.String()
+	}
+	b.WriteString("\n")
+
+	keyW, statusW := lipgloss.Width("KEY"), lipgloss.Width("状态")
+	for _, t := range rows {
+		keyW = max(keyW, lipgloss.Width(t.Key))
+		status, _ := m.catalogStatus(t)
+		statusW = max(statusW, lipgloss.Width(status))
+	}
+	keyW = min(keyW, 20)
+	statusW = min(statusW, max(w/3, 8))
+	descW := max(w-2-2-keyW-2-statusW-2, 10)
+
+	// 目录以后会越来越长，只画放得下的那几行，光标走到哪就跟到哪
+	perPage := max(m.height-14, 5)
+	start := 0
+	if m.cat.cursor >= perPage {
+		start = m.cat.cursor - perPage + 1
+	}
+	end := min(len(rows), start+perPage)
+	if start > 0 {
+		b.WriteString("  " + styles.Dim.Render(fmt.Sprintf("↑ 上面还有 %d 个", start)) + "\n")
+	}
+
+	for i := start; i < end; i++ {
+		t := rows[i]
+		status, kind := m.catalogStatus(t)
+		marker := "  "
+		descStyle := styles.Dim
+		if i == m.cat.cursor {
+			marker = styles.Accent.Render("▌ ")
+			descStyle = lipgloss.NewStyle()
+		}
+		b.WriteString("  " + marker +
+			styles.Key.Render(theme.Pad(t.Key, keyW)) + "  " +
+			descStyle.Render(theme.Truncate(t.Desc, descW)) + "  " +
+			kindStyle(kind).Render(theme.Pad(theme.Truncate(status, statusW), statusW)) + "\n")
+		if i == m.cat.cursor {
+			detail := t.Repo
+			if host := t.releaseHost(); host != "github" {
+				detail = host + " · " + detail
+			}
+			if p := strings.Join(t.Platforms, ", "); p != "" {
+				detail += "  ·  " + p
+			}
+			if t.Custom {
+				detail += "  ·  本机添加"
+			}
+			b.WriteString("      " + styles.Dim.Render(theme.Truncate(detail, max(w-6, 10))) + "\n")
+		}
+	}
+
+	if end < len(rows) {
+		b.WriteString("  " + styles.Dim.Render(fmt.Sprintf("↓ 下面还有 %d 个", len(rows)-end)) + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(m.viewHints("↑↓", "选择", "enter", "安装/加入", "a", "按仓库添加", "r", "刷新目录", "esc", "返回"))
 	return b.String()
 }
 

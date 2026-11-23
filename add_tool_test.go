@@ -17,7 +17,7 @@ func pressKey(m tuiModel, key tea.KeyType) tuiModel {
 	return updated.(tuiModel)
 }
 
-// 列表里按 n 打开新增表单，页面上写清楚仓库要填什么
+// 列表里按 n 先到工具目录，再按 a 打开按仓库添加的表单
 func TestAddToolFormOpens(t *testing.T) {
 	isolateConfig(t)
 	m := newTUIModel()
@@ -26,8 +26,12 @@ func TestAddToolFormOpens(t *testing.T) {
 	m.pending = map[string]bool{}
 
 	m = typeRunes(m, "n")
+	if m.state != catalog {
+		t.Fatalf("按 n 之后 state = %v，想要工具目录", m.state)
+	}
+	m = typeRunes(m, "a")
 	if m.state != addTool {
-		t.Fatalf("按 n 之后 state = %v，想要新增表单", m.state)
+		t.Fatalf("目录里按 a 之后 state = %v，想要新增表单", m.state)
 	}
 	view := plainText(m.viewAdd())
 	for _, want := range []string{"新增工具", "仓库", "owner/name", "添加并安装"} {

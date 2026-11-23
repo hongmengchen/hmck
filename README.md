@@ -19,7 +19,7 @@
 | [kubectl](https://kubernetes.io/docs/reference/kubectl/) | Kubernetes 命令行（`dl.k8s.io` 发版）：看当前 context、API server、连不连得上 |
 | [hmck](https://github.com/hongmengchen/hmck) | 它自己——`hmck upgrade` 会把自己也升到最新 |
 
-以后新增的工具不用改代码：TUI 里按 `n` 填个仓库（或命令行 `hmck add owner/repo`）存进本机配置，立刻就能装、能升级。
+能装什么由一份线上目录说了算：hmck 仓库里的 [`docs/catalog.json`](docs/catalog.json)，加个工具只改这份 JSON，不用发新版 hmck。TUI 里按 `n` 打开[工具目录](#工具目录)，挑一个 `enter` 就加入并开装；目录里没有的，还能现场按仓库添加。
 
 ```
 $ hmck
@@ -58,7 +58,7 @@ $ hmck
 │   ▄█▀
 │ ▄█▀    █████
 
-  ↑↓ 选择  ·  enter 启动/安装  ·  n 新工具  ·  u 升级  ·  U 全部更新  ·  i 信息  ·  g 更新日志
+  ↑↓ 选择  ·  enter 启动/安装  ·  n 工具目录  ·  u 升级  ·  U 全部更新  ·  i 信息  ·  g 更新日志
   d 卸载  ·  s 装 skill  ·  r 重新检查  ·  q 退出
 ```
 
@@ -80,7 +80,7 @@ $ hmck
 
 第一行最右边是**上一次版本更新时间**：hmck 自己装上/升级成功时记进 `state.json`（和 `config.json` 同目录），显示成「刚刚更新 / 3 小时前更新 / 12 天前更新」，超过一个月给日期。不是 hmck 装的（手动替换、从别处拷过来的），就用二进制文件的修改时间兜底，所以每个装好的工具都有时间可看。
 
-`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`n` 打开新增工具表单，填仓库（`owner/name` 或 GitHub 链接）、key 和说明，`enter` 存进配置并直接开始安装；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`i` 看当前状况（glab 的登录状态、kubectl 的集群状态在这一页）；`g` 看选中工具的更新日志；`d` 卸载；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
+`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`n` 打开工具目录，挑一个 `enter` 加入并安装（已加入的直接装/升级），目录里按 `a` 才是按仓库新增，填仓库（`owner/name` 或 GitHub 链接）、key 和说明，`enter` 存进配置并直接开始安装；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`i` 看当前状况（glab 的登录状态、kubectl 的集群状态在这一页）；`g` 看选中工具的更新日志；`d` 卸载；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
 
 ### 更新日志
 
@@ -147,6 +147,47 @@ hmck uninstall glab --yes        # 不再确认，直接删（脚本 / agent 用
 命令行和 TUI 一样要二次确认：打印清单后，输入工具名回车才删，敲错或直接回车都算取消。
 stdin 不是终端时（脚本、agent）不会停下来问，也不删，要删必须显式加 `--yes`。
 
+## 工具目录
+
+hmck 能装什么，由仓库里的 [`docs/catalog.json`](docs/catalog.json) 说了算——这份文件在 `main` 分支上，
+hmck 每次打开目录页或跑 `hmck catalog` 时现拉，所以加一个工具只用提交这份 JSON，不用等新版 hmck。
+
+TUI 里按 `n`：
+
+- 每行一个工具，右边是本机的状态：版本号、`未添加`、`未安装`、本平台没有包、或 `PATH 上 1.130.0`
+- `enter` 就是加入并安装；已经加入过的直接走安装/升级
+- `a` 打开按仓库添加的表单，目录里没有的工具走这条
+- `r` 重新拉一遍目录，`esc` 回列表
+
+命令行里看同一份（只查本机，不联网）：
+
+```bash
+hmck catalog                 # 表格：工具、本机状态、说明、仓库
+hmck catalog --json          # 给脚本和 agent 用
+```
+
+**目录读不到怎么办**：同一份 JSON 也编进了程序，线上拉不到（离线、GitHub 不通、文件被删）就退回这份
+内置副本，并在页面上注明是「内置副本」和拉不到的原因；`HMCK_CATALOG_URL` 可以把地址指到自己的镜像（内网或测试环境）。
+
+**加一条**：在 `tools` 数组里加一项，字段和 `hmck add` 认的一样——`key`、`name`、`desc`、`repo` 必填，
+其余可省（`platforms` 不写就按六个常见平台记）：
+
+| 字段 | 作用 |
+| --- | --- |
+| `key` | 程序名，也是 `hmck install <key>` 用的名字；小写字母、数字、`-` |
+| `repo` | `owner/name`；GitLab 工具写 `owner/project` |
+| `host` | `github`（默认）、`gitlab`、`kubernetes`（走 `dl.k8s.io`） |
+| `name` / `desc` | 列表里显示的名字和一句话说明 |
+| `platforms` | `goos/goarch` 列表，本机不在里面就标「本平台没有」，不去下载 |
+| `checksums` | 发布里带 `checksums.txt` 时为 `true` |
+| `asset` / `archive` | 资产名模板（`{ver}`、`{goos}`、`{goarch}`、`{ext}`），以及要不要解压 |
+| `bin_path` | 压缩包里二进制的路径 |
+| `skill` / `post_install` | 装完要不要配 agent skill、跑什么后置命令 |
+| `version_args` | 问已装版本时传的参数，默认 `version` |
+
+写坏了不会连累整份目录：单条不合法（key 写错、仓库写错、`host` 不认识、跟前面重复）会被跳过并计数，
+页面上提示「目录里有 N 条读不懂」。内置工具的 key 一律以程序里的定义为准——目录里写 `glab` 也改不了它从哪装、怎么校验。
+
 ## 安装
 
 macOS / Linux：
@@ -175,6 +216,7 @@ macOS / Linux 默认装到 `~/.local/bin`（root 下是 `/usr/local/bin`）；Wi
 ```bash
 hmck                      # 打开管理界面
 hmck list                 # 纯文本表格；--json 给脚本用
+hmck catalog              # 在线工具目录，带本机状态；--json 给脚本用
 hmck run npm-token        # 直接启动，后面的参数原样传过去
 hmck install npm-token    # 安装最新版
 hmck upgrade              # 升级所有可升级的工具（包括 hmck 自己）
@@ -205,9 +247,12 @@ hmck 自己也在托管列表里：已装版本是编译进二进制的版本号
 
 ## 新增一个工具
 
-**首选：写进本机配置，不用重新编译 hmck。**
+**想让装了 hmck 的人都能用：加进[工具目录](#工具目录)。** 在 `docs/catalog.json` 的 `tools` 里加一条，提交到 `main` 就行，
+下次谁按 `n` 就能看到，不用发新版 hmck。
 
-TUI 里按 `n` 就能填：仓库必填，key 不填按仓库名取，说明可空；`enter` 存进配置，读完发布信息就接着装。
+**只给自己用：写进本机配置，不用碰代码。**
+
+TUI 里在工具目录页按 `a` 就能填：仓库必填，key 不填按仓库名取，说明可空；`enter` 存进配置，读完发布信息就接着装。
 命令行的话：
 
 ```bash

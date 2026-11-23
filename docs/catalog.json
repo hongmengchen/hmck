@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "_comment": "hmck 的工具目录。加一个工具就在 tools 里加一条，字段说明见 README 的「工具目录」；内置工具的 key 以程序里的定义为准。",
+  "tools": [
+    {
+      "key": "kube-token",
+      "name": "kube-token",
+      "desc": "粘贴新 token 替换 kubeconfig 里的旧值",
+      "repo": "hongmengchen/kube-token",
+      "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64", "windows/amd64", "windows/arm64"],
+      "checksums": true,
+      "skill": true,
+      "post_install": ["skill", "--quiet"]
+    },
+    {
+      "key": "npm-token",
+      "name": "npm-token",
+      "desc": "检查并更新 ~/.npmrc 里的 registry token",
+      "repo": "hongmengchen/npm-token",
+      "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64", "windows/amd64", "windows/arm64"],
+      "checksums": true,
+      "skill": true,
+      "post_install": ["skill", "--quiet"]
+    },
+    {
+      "key": "glab",
+      "name": "glab",
+      "desc": "GitLab 命令行：MR、issue、流水线都在终端里",
+      "host": "gitlab",
+      "repo": "gitlab-org/cli",
+      "asset": "glab_{ver}_{goos}_{goarch}.{archive}",
+      "archive": true,
+      "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64", "linux/386", "windows/amd64", "windows/arm64", "windows/386"],
+      "checksums": true
+    },
+    {
+      "key": "kubectl",
+      "name": "kubectl",
+      "desc": "Kubernetes 命令行：Pod、日志、集群都在终端里",
+      "host": "kubernetes",
+      "repo": "kubernetes/kubernetes",
+      "asset": "kubectl{ext}",
+      "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64", "windows/amd64", "windows/arm64"],
+      "checksums": true,
+      "version_args": ["version", "--client"]
+    },
+    {
+      "key": "hmck",
+      "name": "hmck",
+      "desc": "管理这些命令行小工具，包括它自己",
+      "repo": "hongmengchen/hmck",
+      "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64", "windows/amd64", "windows/arm64"],
+      "checksums": true,
+      "post_install": ["skill", "--quiet"]
+    }
+  ]
+}

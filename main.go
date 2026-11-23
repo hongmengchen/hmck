@@ -14,7 +14,7 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.10.4"
+var version = "0.10.5"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -44,6 +44,8 @@ func run(args []string) int {
 		return runInfo(rest)
 	case "changelog", "changes", "notes":
 		return runChangelog(rest)
+	case "catalog", "cat":
+		return runCatalog(rest)
 	case "add":
 		return runAdd(rest)
 	case "rm", "remove":
@@ -78,6 +80,7 @@ func usage(w io.Writer) {
   hmck upgrade [<tool>]    升级；不带参数就升级所有可升级的工具（包括 hmck 自己）
   hmck info <tool>         看这个工具装着没、装在哪、登录状态（--json）
   hmck changelog <tool>    看这个工具最近几个版本改了什么（--versions N，默认 5）
+  hmck catalog [--json]    看在线目录里有哪些 hmck 能装的小工具
   hmck add <owner/repo>    把一个新工具加进本机配置，之后就能 install/upgrade
   hmck uninstall <tool>    卸载 hmck 装的那份（要敲工具名确认；--keep-skill 保留 skill，--yes 跳过确认）
   hmck rm <tool>           删掉自定义工具的配置（内置的删不了）
