@@ -516,13 +516,17 @@ func verifyChecksum(t tool, tag, asset, file string) error {
 			return fmt.Errorf("%s.sha256 里没有哈希", asset)
 		}
 	} else {
-		resp, err := downloadClient.Get(releaseAssetURLFor(t, tag, "checksums.txt"))
+		name := t.ChecksumsFile
+		if name == "" {
+			name = "checksums.txt"
+		}
+		resp, err := downloadClient.Get(releaseAssetURLFor(t, tag, name))
 		if err != nil {
-			return fmt.Errorf("下载 checksums.txt 失败: %w", err)
+			return fmt.Errorf("下载 %s 失败: %w", name, err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("下载 checksums.txt 失败: %s", resp.Status)
+			return fmt.Errorf("下载 %s 失败: %s", name, resp.Status)
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if err != nil {
@@ -536,7 +540,7 @@ func verifyChecksum(t tool, tag, asset, file string) error {
 			}
 		}
 		if want == "" {
-			return fmt.Errorf("checksums.txt 里没有 %s", asset)
+			return fmt.Errorf("%s 里没有 %s", name, asset)
 		}
 	}
 

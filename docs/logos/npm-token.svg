@@ -2,26 +2,18 @@
   <title id="npm-token-title">npm-token</title>
   <!--
     招牌：一把挂锁（token 锁在 .npmrc 里），锁身上一个钥匙孔。
-    这不是随手画的矢量图，是照着终端里的取样网格一比一摆的像素画：画布 24 个单位宽、
-    24 个单位高，一个像素块 1 单位宽、2 单位高（终端里半个字符宽、一个字符高），
-    所以每个 rect 都会正好落进一个像素，渲染出来没有毛边，也不会被阈值吃掉细节。
+    这不是随手画的矢量图，是照着终端网格摆的像素画：
+    画布 24 单位宽、24 单位高，一个取样点（终端里半个字符宽、半个字符高）
+    是 2 单位宽、4 单位高，每个 rect 正好落进一个取样点；招牌缩成 6 列 × 3 行，
+    每格是 2×2 个取样点，边缘就不会有半格相错的毛边。
   -->
-  <rect x="8" y="0" width="8" height="2" fill="#F87171"/>
-  <rect x="8" y="2" width="8" height="2" fill="#F87171"/>
-  <rect x="8" y="4" width="2" height="2" fill="#F87171"/>
-  <rect x="14" y="4" width="2" height="2" fill="#F87171"/>
-  <rect x="8" y="6" width="2" height="2" fill="#F87171"/>
-  <rect x="14" y="6" width="2" height="2" fill="#F87171"/>
-  <rect x="4" y="8" width="16" height="2" fill="#F87171"/>
-  <rect x="4" y="10" width="16" height="2" fill="#F87171"/>
-  <rect x="4" y="12" width="6" height="2" fill="#F87171"/>
-  <rect x="14" y="12" width="6" height="2" fill="#F87171"/>
-  <rect x="4" y="14" width="6" height="2" fill="#F87171"/>
-  <rect x="14" y="14" width="6" height="2" fill="#F87171"/>
-  <rect x="4" y="16" width="7" height="2" fill="#F87171"/>
-  <rect x="13" y="16" width="7" height="2" fill="#F87171"/>
-  <rect x="4" y="18" width="7" height="2" fill="#F87171"/>
-  <rect x="13" y="18" width="7" height="2" fill="#F87171"/>
-  <rect x="4" y="20" width="16" height="2" fill="#F87171"/>
-  <rect x="4" y="22" width="16" height="2" fill="#F87171"/>
+  <!-- 锁梁：顶上一横，两条腿各占一个取样点 -->
+  <rect x="8" y="0" width="8" height="4" fill="#F87171"/>
+  <rect x="8" y="4" width="2" height="4" fill="#F87171"/>
+  <rect x="14" y="4" width="2" height="4" fill="#F87171"/>
+  <!-- 锁身：中间留出钥匙孔 -->
+  <rect x="4" y="8" width="16" height="4" fill="#F87171"/>
+  <rect x="4" y="12" width="6" height="4" fill="#F87171"/>
+  <rect x="14" y="12" width="6" height="4" fill="#F87171"/>
+  <rect x="4" y="16" width="16" height="8" fill="#F87171"/>
 </svg>

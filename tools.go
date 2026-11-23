@@ -15,20 +15,22 @@ import (
 // tool 是 hmck 管理的一个独立工具：内置的写在 registry 里，
 // 以后新增的可以直接 `hmck add owner/repo` 存进本机配置，不用重新编译 hmck。
 type tool struct {
-	Key         string   `json:"key"`                    // 也用作发布资产前缀
-	Name        string   `json:"name,omitempty"`         // 展示名，默认同 Key
-	Desc        string   `json:"desc,omitempty"`         // 一句话说明
-	Host        string   `json:"host,omitempty"`         // 发布平台：github（默认）或 gitlab
-	Repo        string   `json:"repo"`                   // owner/name
-	Binary      string   `json:"binary,omitempty"`       // 安装后的可执行文件名（不含 .exe），默认同 Key
-	Asset       string   `json:"asset,omitempty"`        // 资产名模板，默认 {key}_{goos}_{goarch}{ext}
-	Archive     bool     `json:"archive,omitempty"`      // 资产是压缩包（.tar.gz，Windows 为 .zip）
-	BinPath     string   `json:"bin_path,omitempty"`     // 压缩包里二进制的路径，默认 bin/<binary>
-	Platforms   []string `json:"platforms"`              // 该工具发布过哪些 os/arch
-	Checksums   bool     `json:"checksums,omitempty"`    // 发布里有没有 checksums.txt
-	Skill       bool     `json:"skill,omitempty"`        // 支不支持 `<tool> skill --quiet`
-	PostInstall []string `json:"post_install,omitempty"` // 装完/升级后要跑的子命令（忽略失败）
-	VersionArgs []string `json:"version_args,omitempty"` // 问版本号的子命令，默认 version；kubectl 用 version --client
+	Key       string   `json:"key"`                 // 也用作发布资产前缀
+	Name      string   `json:"name,omitempty"`      // 展示名，默认同 Key
+	Desc      string   `json:"desc,omitempty"`      // 一句话说明
+	Host      string   `json:"host,omitempty"`      // 发布平台：github（默认）或 gitlab
+	Repo      string   `json:"repo"`                // owner/name
+	Binary    string   `json:"binary,omitempty"`    // 安装后的可执行文件名（不含 .exe），默认同 Key
+	Asset     string   `json:"asset,omitempty"`     // 资产名模板，默认 {key}_{goos}_{goarch}{ext}
+	Archive   bool     `json:"archive,omitempty"`   // 资产是压缩包（.tar.gz，Windows 为 .zip）
+	BinPath   string   `json:"bin_path,omitempty"`  // 压缩包里二进制的路径，默认 bin/<binary>
+	Platforms []string `json:"platforms"`           // 该工具发布过哪些 os/arch
+	Checksums bool     `json:"checksums,omitempty"` // 发布里有没有校验文件
+	// ChecksumsFile 是校验文件的名字，默认 checksums.txt；argo-cd 这类用 cli_checksums.txt
+	ChecksumsFile string   `json:"checksums_file,omitempty"`
+	Skill         bool     `json:"skill,omitempty"`        // 支不支持 `<tool> skill --quiet`
+	PostInstall   []string `json:"post_install,omitempty"` // 装完/升级后要跑的子命令（忽略失败）
+	VersionArgs   []string `json:"version_args,omitempty"` // 问版本号的子命令，默认 version；kubectl 用 version --client
 
 	OwnDir       bool   `json:"-"` // 只管理 hmck 目录里的那一份，不接管 PATH 上别人装的副本（如 glab、kubectl）
 	Status       bool   `json:"-"` // hmck 能读出它自己的状态（登录 / 集群）
@@ -111,6 +113,28 @@ var registry = []tool{
 		Status:       true,
 		StatusSource: "kubectl",
 		VersionArgs:  []string{"version", "--client"},
+	},
+	{
+		// argo-cd 的资产叫 argocd-darwin-arm64（连字符，不带版本号），
+		// 校验文件也不是 checksums.txt 而是 cli_checksums.txt。
+		// 版本号问 `argocd version --client`，不连集群。
+		Key:    "argocd",
+		Name:   "argocd",
+		Desc:   "Argo CD 命令行：应用、同步、回滚都在终端里",
+		Repo:   "argoproj/argo-cd",
+		Binary: "argocd",
+		Asset:  "argocd-{goos}-{goarch}{ext}",
+		Platforms: []string{
+			"darwin/amd64", "darwin/arm64",
+			"linux/amd64", "linux/arm64",
+			"windows/amd64",
+		},
+		Checksums:     true,
+		ChecksumsFile: "cli_checksums.txt",
+		VersionArgs:   []string{"version", "--client"},
+		// 跟 glab / kubectl 一样：brew 装的那份不接管、不覆盖，
+		// hmck 只管自己目录里的这一份（hmck install argocd 显式装）
+		OwnDir: true,
 	},
 	{
 		// hmck 自己也在 GitHub 发版，升级时和别的工具走同一套下载/校验/替换
@@ -404,14 +428,18 @@ var versionPattern = regexp.MustCompile(`(?i)\bv?\d+\.\d+(?:\.\d+)?(?:[-+][0-9a-
 
 // parseVersionOutput 从 `<tool> version` 的输出里读版本号，读不出来返回空
 func parseVersionOutput(out string) string {
+	v := ""
 	if m := versionPattern.FindString(out); m != "" {
-		return strings.TrimPrefix(m, "v")
+		v = strings.TrimPrefix(m, "v")
+	} else if fields := strings.Fields(out); len(fields) > 0 {
+		v = strings.TrimPrefix(fields[len(fields)-1], "v")
 	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		return ""
+	// 构建信息不参与比较：argo-cd 输出的是 `v3.6.2+edd8eb6`，
+	// 留着 + 后面那串会把同一版当成可升级
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
 	}
-	return strings.TrimPrefix(fields[len(fields)-1], "v")
+	return v
 }
 
 // installedVersion 跑 `<tool> version` 取版本号；失败返回空。

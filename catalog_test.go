@@ -137,6 +137,33 @@ func TestLoadCatalogEnvOverride(t *testing.T) {
 	}
 }
 
+// argo-cd 的资产是 argocd-darwin-arm64、校验文件叫 cli_checksums.txt，
+// 和默认的 <key>_<goos>_<goarch> / checksums.txt 不一样，目录里得写清楚
+func TestEmbeddedCatalogHasArgocd(t *testing.T) {
+	tools, _, err := parseCatalog(catalogEmbedded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got tool
+	for _, tl := range tools {
+		if tl.Key == "argocd" {
+			got = tl
+		}
+	}
+	if got.Key == "" {
+		t.Fatalf("内置目录里没有 argocd: %v", catalogToolKeys(tools))
+	}
+	if got.Repo != "argoproj/argo-cd" || !got.Checksums || got.ChecksumsFile != "cli_checksums.txt" {
+		t.Errorf("argocd 条目不对: %+v", got)
+	}
+	if a := assetName(got, "darwin", "arm64", "v3.6.2"); a != "argocd-darwin-arm64" {
+		t.Errorf("资产名 = %q", a)
+	}
+	if a := assetName(got, "windows", "amd64", "v3.6.2"); a != "argocd-windows-amd64.exe" {
+		t.Errorf("Windows 资产名 = %q", a)
+	}
+}
+
 func catalogModel(t *testing.T) tuiModel {
 	t.Helper()
 	isolateConfig(t)

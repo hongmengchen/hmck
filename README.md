@@ -17,6 +17,7 @@
 | [npm-token](https://github.com/hongmengchen/npm-token) | 检查并更新 `~/.npmrc` 里的 registry token |
 | [glab](https://gitlab.com/gitlab-org/cli) | GitLab 官方 CLI：MR、issue、流水线都在终端里；装了就能看登录状态 |
 | [kubectl](https://kubernetes.io/docs/reference/kubectl/) | Kubernetes 命令行（`dl.k8s.io` 发版）：看当前 context、API server、连不连得上 |
+| [argocd](https://github.com/argoproj/argo-cd) | Argo CD 命令行：应用、同步、回滚都在终端里 |
 | [hmck](https://github.com/hongmengchen/hmck) | 它自己——`hmck upgrade` 会把自己也升到最新 |
 
 能装什么由一份线上目录说了算：hmck 仓库里的 [`docs/catalog.json`](docs/catalog.json)，加个工具只改这份 JSON，不用发新版 hmck。TUI 里按 `n` 打开[工具目录](#工具目录)，挑一个 `enter` 就加入并开装；目录里没有的，还能现场按仓库添加。
@@ -64,7 +65,7 @@ $ hmck
 
 打开后先列出本地工具（版本、安装位置），最新版在后台查询；查到哪个就刷新哪张卡片，查询期间那一格显示转圈，不用对着一个空白的加载页等网络。每个工具占一块，中间用淡线隔开：左边是该工具自己的招牌，右边三行分别是「名称和版本」「它干什么 / 装在哪」「仓库和最近一版改了什么」。
 
-招牌是 [`docs/logos`](docs/logos) 里各工具自己的 SVG（glab 用的是 GitLab 官方 press kit 的狸猫）编进程序后，运行时光栅成 24×12 个像素、再折成 12 列 × 6 行的象限字符（`▘▀▖▌▛█` 这些实心方块），颜色取 SVG 里的原色：hmck 是绿色箭头（`>` 当提示符，右边一条下划线，就是 `hmck` 三个字母里那个横）、kube-token 是蓝色六边形框里一颗核心、npm-token 是红挂锁。造型是照着终端网格手摆的像素画，不是把普通矢量图缩下来——缩下来的图在这个尺寸上会糊成一块。终端颜色少的时候由 lipgloss 自己降级，不依赖图片文件、字体或网络；自定义工具和读不出 SVG 的工具，还是退回方框加名字首字母。
+招牌是 [`docs/logos`](docs/logos) 里各工具自己的 SVG（glab 用的是 GitLab 官方 press kit 的狸猫）编进程序后，运行时光栅成 12×6 个像素、再折成 6 列 × 3 行的象限字符（`▘▀▖▌▛█` 这些实心方块），颜色取 SVG 里的原色：hmck 是绿色箭头（`>` 当提示符，右边一条下划线，就是 `hmck` 三个字母里那个横）、kube-token 是蓝色六边形框里一颗核心、npm-token 是红挂锁、argocd 是橙色圆角块里一个白 A。造型是照着终端网格手摆的像素画，不是把普通矢量图缩下来——缩下来的图在这个尺寸上会糊成一块。终端颜色少的时候由 lipgloss 自己降级，不依赖图片文件、字体或网络；自定义工具和读不出 SVG 的工具，还是退回方块字首字母。
 
 第三行的更新日志预览是启动时顺手从各仓库的 `CHANGELOG.md` 抓回来的（没有就退到 release notes），失败也不影响列表。自定义工具用同款方框放名字首字母。
 
@@ -179,7 +180,8 @@ hmck catalog --json          # 给脚本和 agent 用
 | `host` | `github`（默认）、`gitlab`、`kubernetes`（走 `dl.k8s.io`） |
 | `name` / `desc` | 列表里显示的名字和一句话说明 |
 | `platforms` | `goos/goarch` 列表，本机不在里面就标「本平台没有」，不去下载 |
-| `checksums` | 发布里带 `checksums.txt` 时为 `true` |
+| `checksums` | 发布里带校验文件时为 `true` |
+| `checksums_file` | 校验文件的名字，默认 `checksums.txt`；argo-cd 用 `cli_checksums.txt` |
 | `asset` / `archive` | 资产名模板（`{ver}`、`{goos}`、`{goarch}`、`{ext}`），以及要不要解压 |
 | `bin_path` | 压缩包里二进制的路径 |
 | `skill` / `post_install` | 装完要不要配 agent skill、跑什么后置命令 |
@@ -232,7 +234,7 @@ hmck skill                # 给 hmck 和已安装的工具装 agent skill
 
 版本检测：已安装版本读 `<tool> version`（kubectl 用 `version --client`，不连集群）；最新版看 GitHub `releases/latest` 的跳转（不消耗 API 限流），失败再退回 API。kubectl 走 `dl.k8s.io`：最新版读 `stable.txt`，资产按平台分目录下载，校验的是资产旁边同名的 `.sha256`。
 
-安装位置：统一放在 `~/.local/bin`（Windows 是 `%USERPROFILE%\.local\bin`）；hmck 自己装在系统目录（如 `/usr/local/bin`）时，新工具跟着它放在同一目录。工具已经在 PATH 里就在原位置升级。内置工具的 release 都带 `checksums.txt`，安装和升级会校验 SHA-256。
+安装位置：统一放在 `~/.local/bin`（Windows 是 `%USERPROFILE%\.local\bin`）；hmck 自己装在系统目录（如 `/usr/local/bin`）时，新工具跟着它放在同一目录。工具已经在 PATH 里就在原位置升级。内置工具的 release 都带校验文件（`checksums.txt`，argo-cd 是 `cli_checksums.txt`），安装和升级会校验 SHA-256。
 
 glab 和 kubectl 是个例外（brew / apt 装的 glab、Docker Desktop 自带的 kubectl 太多）：hmck 只认自己目录里的那一份，不接管 PATH 上别人装的副本——卡片上会注明「PATH 上已有一份」，`hmck uninstall glab` 也只删自己那份。按 `enter` 启动的就是那一份（hmck 自己装过的话它排在前面，没有也不另装第二个副本——两个 glab 并存会把人和 agent 一直在用的那份顶掉）；按 `u` 只说明它归谁管、该用谁升级。状态照样读得出来：glab 看登录，kubectl 看集群。卸不卸由你按 `d` 决定。
 

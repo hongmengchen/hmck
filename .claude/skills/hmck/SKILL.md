@@ -1,11 +1,11 @@
 ---
 name: hmck
-description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、glab、kubectl 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态和集群连通性、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「卸载某个工具 / 卸载 hmck」「自动更新」「新增一个工具让 hmck 管理」「hmck 都能装什么 / 工具目录」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
+description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、glab、kubectl、argocd 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态和集群连通性、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「卸载某个工具 / 卸载 hmck」「自动更新」「新增一个工具让 hmck 管理」「hmck 都能装什么 / 工具目录」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
 ---
 
 # hmck
 
-`hmck` 是这台机器上的工具管理器：内置 kube-token、npm-token、glab、kubectl 以及它自己，也能把以后的新工具加进来。
+`hmck` 是这台机器上的工具管理器：内置 kube-token、npm-token、glab、kubectl、argocd 以及它自己，也能把以后的新工具加进来。
 它知道每个工具的已安装版本、最新版本、安装路径，能安装、升级、直接启动、卸载，
 还会顺手把各工具的 agent skill 刷新到全局目录；对 glab 这类工具能读出登录状态，对 kubectl 能读出当前 context 和集群连通性。
 
@@ -100,9 +100,9 @@ TUI（只有用户自己在终端里用）：`↑↓` 选择，`enter` 启动（
 卡片上版本号前的图标就是状态：`✓` 已是最新、`↑` 可更新（`旧 → 新`）、`↓` 已下载待安装、
 `○` 未安装、`!` 查不到最新版或没有对应平台的发布。第一行右边是上次版本更新时间。
 每张卡片左边是该工具自己的招牌：`docs/logos/*.svg`（glab 是 GitLab 官方 press kit 的狸猫）
-编进程序，运行时光栅成 24×12 像素、折成 12 列 × 6 行的象限字符（`▘▀▖▌█` 这类实心方块），
-颜色取 SVG 原色；造型是照终端网格手摆的像素画（画布 24 单位宽、24 单位高，一格像素
-1 单位宽 2 单位高），不是缩小的普通矢量图。自定义工具没有 SVG，退回方框加首字母。招牌右边三行依次是名称和版本、作用 / 装在哪、仓库 / 登录状态 / 最近一版
+编进程序，运行时光栅成 12×6 像素、折成 6 列 × 3 行的象限字符（`▘▀▖▌█` 这类实心方块），
+颜色取 SVG 原色；造型是照终端网格手摆的像素画（画布 24 单位宽、24 单位高，一个取样点
+2 单位宽 4 单位高），不是缩小的普通矢量图。自定义工具没有 SVG，退回方块字首字母。招牌右边三行依次是名称和版本、作用 / 装在哪、仓库 / 登录状态 / 最近一版
 的第一条说明（启动时抓 `CHANGELOG.md`，失败就只显示仓库名）。
 
 glab 在 brew / apt 装的人多、kubectl 常跟着 Docker Desktop 来，hmck 只认自己目录里的那一份（`OwnDir`）：
@@ -180,7 +180,8 @@ hmck skill --no-tools   # 只装 hmck 自己的
 ```
 
 `key`、`repo` 必填；其余可选：`name`、`desc`、`host`（`github` 默认、`gitlab`、`kubernetes`）、
-`platforms`（不写按六个常见平台记）、`checksums`、`asset`（资产名模板，`{ver}`/`{goos}`/`{goarch}`/`{ext}`）、
+`platforms`（不写按六个常见平台记）、`checksums`、`checksums_file`（校验文件的名字，默认
+`checksums.txt`；argo-cd 这类用 `cli_checksums.txt`）、`asset`（资产名模板，`{ver}`/`{goos}`/`{goarch}`/`{ext}`）、
 `archive`、`bin_path`、`skill`、`post_install`、`version_args`。
 单条写坏只跳过那一条并计数，不影响整份目录；但内置工具的 key 一律以程序里的定义为准，
 目录里怎么写都改不了它从哪装、怎么校验。线上拉不到（离线、GitHub 不通）时 hmck 退回编进程序的

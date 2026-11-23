@@ -100,7 +100,7 @@ func TestLogoKeepsSVGColors(t *testing.T) {
 	}
 }
 
-// 自定义工具没有 SVG，退回和内置招牌同样大的首字母方块字：6 行、12 格宽，占满同一块地方
+// 自定义工具没有 SVG，退回和内置招牌同样大的首字母方块字：3 行、6 格宽，占满同一块地方
 func TestLogoFallsBackToMark(t *testing.T) {
 	for _, key := range []string{"my-tool", "中文工具"} {
 		rows := toolLogo(tool{Key: key})

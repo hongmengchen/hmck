@@ -36,6 +36,21 @@ func TestIsNewer(t *testing.T) {
 	}
 }
 
+// argocd 的版本号带着构建信息，读出来要去掉 + 后面那段，否则装完还是显示可升级
+func TestParseVersionOutput(t *testing.T) {
+	cases := []struct{ out, want string }{
+		{"argocd: v3.6.2+edd8eb6\n  BuildDate: 2026-11-01T00:00:00Z\n", "3.6.2"},
+		{"glab 1.130.0 (9b430a11f)", "1.130.0"},
+		{"kubectl version v1.37.2", "1.37.2"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := parseVersionOutput(c.out); got != c.want {
+			t.Errorf("parseVersionOutput(%q) = %q，想要 %q", c.out, got, c.want)
+		}
+	}
+}
+
 func TestAssetNamesAndSupport(t *testing.T) {
 	var npmTool tool
 	for _, t0 := range registry {
@@ -853,6 +868,51 @@ func TestKubernetesAssetURL(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" && asset != "kubectl.exe" {
 		t.Errorf("Windows 的资产名 = %q", asset)
+	}
+}
+
+// 校验文件不一定叫 checksums.txt：argo-cd 用 cli_checksums.txt，
+// 目录里写了 checksums_file 就按这个名字去取
+func TestVerifyCustomChecksumsFile(t *testing.T) {
+	payload := bytes.Repeat([]byte("ARGOCD"), 20_000)
+	sum := sha256.Sum256(payload)
+	asset := "argocd-darwin-arm64"
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path)
+		if !strings.HasSuffix(r.URL.Path, "/cli_checksums.txt") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, "%s  %s\n", hex.EncodeToString(sum[:]), asset)
+	}))
+	defer srv.Close()
+
+	old := releaseAssetURL
+	releaseAssetURL = func(repo, tag, name string) string { return srv.URL + "/download/" + tag + "/" + name }
+	defer func() { releaseAssetURL = old }()
+
+	file := filepath.Join(t.TempDir(), "argocd")
+	if err := os.WriteFile(file, payload, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tl := tool{
+		Key: "argocd", Repo: "argoproj/argo-cd", Binary: "argocd",
+		Asset: "argocd-{goos}-{goarch}{ext}", Checksums: true, ChecksumsFile: "cli_checksums.txt",
+	}
+	if err := verifyChecksum(tl, "v3.6.2", asset, file); err != nil {
+		t.Fatalf("校验应当通过: %v", err)
+	}
+	for _, p := range asked {
+		if strings.HasSuffix(p, "/checksums.txt") {
+			t.Errorf("不该去取默认的 checksums.txt: %v", asked)
+		}
+	}
+	if err := os.WriteFile(file, []byte("tampered"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyChecksum(tl, "v3.6.2", asset, file); err == nil {
+		t.Error("内容和哈希对不上时应当失败")
 	}
 }
 

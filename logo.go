@@ -16,8 +16,8 @@ import (
 )
 
 // 招牌用的就是各工具仓库里的真 SVG（glab 是 GitLab 官方的狸猫）。
-// 终端放不下图片，所以把 SVG 光栅成 24×12 个像素，再用象限字符（▘▝▀▖▌…█）
-// 一个字符格画 2×2 个实心像素：一块招牌 12 列 × 6 行。
+// 终端放不下图片，所以把 SVG 光栅成 12×6 个像素，再用象限字符（▘▝▀▖▌…█）
+// 一个字符格画 2×2 个实心像素：一块招牌 6 列 × 3 行，够认出是谁，又不占地方。
 // 字符格是半宽一格的，所以像素按 2:1 的网格取样，画出来才是方的；
 // 像素是实心的，边缘只会是台阶，不会像盲文那样是一串断开的点。
 // 颜色走真实色值，终端颜色少的时候由 lipgloss 自己降级。
@@ -26,14 +26,18 @@ import (
 var logoSVGs embed.FS
 
 const (
-	// logoWidth 是招牌的字符宽度；像素网格比它宽一倍（像素是半个字符宽、一个字符高）
-	logoWidth = 12
+	// logoWidth 是招牌的字符宽度；像素网格比它宽一倍（像素是半个字符宽、半个字符高）
+	logoWidth = 6
 	logoDots  = logoWidth * 2 // 光栅横向像素数
 	logoRowsN = logoWidth / 2 // 字符行数
 
+	// logoCanvas 是自家像素画（docs/logos/*.svg）的画布边长：
+	// 2 单位宽、4 单位高正好是一个取样点，整幅按 2:1 缩到像素网格上
+	logoCanvas = 24
+
 	logoSS = 4 // 每个像素取 4×4 个采样，边缘落在半个像素上也能定下来
 
-	// 细线在 12 行的像素网格上会细到看不见：统一撑到这个宽度（单位：像素行）
+	// 细线在这么小的像素网格上会细到看不见：统一撑到这个宽度（单位：像素行）
 	minStrokeDots = 1.4
 )
 
@@ -73,7 +77,7 @@ func svgLogo(key string) []string {
 	return styleLogoCells(logoCells(pix))
 }
 
-// markLogo 是没有 SVG 时的退路：把工具名的首字母画成和招牌一样大的 6×12 方块字。
+// markLogo 是没有 SVG 时的退路：把工具名的首字母画成和招牌一样大的方块字。
 // 中文等宽字符画不出来，退成问号；颜色用中性的石板灰，认的是字母不是品牌色
 func markLogo(t tool) []string {
 	return styleLogoCells(letterCells(markLetter(t)))
@@ -95,16 +99,15 @@ func markLetter(t tool) rune {
 // 自定义工具没有品牌色，用石板灰；深浅两种终端都看得清
 var markInk = color.RGBA{R: 0x94, G: 0xA3, B: 0xB8, A: 0xff}
 
-// letterCells 把 4×5 的点阵字放大 2 倍摆到 24×12 的像素网格上。
-// 每个字形像素占 2×2 个格子像素，起点必须落在偶数格上，否则一行字会
-// 横跨两个字符行，画出来是半格相错的虚线；5 行字形占不满 6 个字符行，
-// 空出来的一行放在底下，上面顶格看着更稳
+// letterCells 把 4×5 的点阵字摆到 12×6 的像素网格上，居中偏上。
+// 网格只有 6 行，字形一个像素就占一个取样点：4 格宽、5 格高，
+// 左右各留 4 格，底下空一行，和内置招牌占同一块地方
 func letterCells(ch rune) [][]logoCell {
 	glyph, ok := glyph4x5[ch]
 	if !ok {
 		glyph = glyph4x5['?']
 	}
-	const scale, x0, y0 = 2, 8, 0
+	const scale, x0, y0 = 1, 4, 0
 	pix := make([]logoDot, logoDots*logoRowsN*2)
 	for gy, line := range glyph {
 		for gx, c := range line {
@@ -780,10 +783,10 @@ func rasterizeLogoRect(img *logoImage, nx, ny int) []logoDot {
 	if side <= 0 {
 		return nil
 	}
-	// 24×24 的画布是照着取样网格一比一摆的像素画：直接映射整个画布，
-	// 不裁不缩，每个 rect 正好是一个色块。裁内容的话，画不满整幅的字标
-	// （比如 kubectl 的 K8S）会被拉伸，边缘就落到半个像素上
-	if img.w == logoDots && img.h == logoDots {
+	// 自家像素画的画布是 24×24，正好是取样网格 12×6 的两倍：直接映射整个画布，
+	// 不裁不缩，每个 rect（2×4 单位）正好落进一个取样点。
+	// 裁内容的话，画不满整幅的字标（比如 kubectl 的 K8S）会被拉伸
+	if img.w == logoCanvas && img.h == logoCanvas {
 		minX, minY, side = img.minX, img.minY, img.w
 	} else {
 		minX -= (side - (maxX - minX)) / 2

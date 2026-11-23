@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-labelledby="argocd-title">
+  <title id="argocd-title">argocd</title>
+  <!--
+    招牌：Argo CD 的橙色圆角块，中间一个白色的 A。
+    这不是随手画的矢量图，是照着终端网格摆的像素画：
+    画布 24 单位宽、24 单位高，一个取样点（终端里半个字符宽、半个字符高）
+    是 2 单位宽、4 单位高，每个 rect 正好落进一个取样点；招牌缩成 6 列 × 3 行，
+    每格是 2×2 个取样点，边缘就不会有半格相错的毛边。
+  -->
+  <rect x="6" y="0" width="12" height="4" fill="#F97316"/>
+  <rect x="2" y="4" width="20" height="4" fill="#F97316"/>
+  <rect x="0" y="8" width="24" height="8" fill="#F97316"/>
+  <rect x="2" y="16" width="20" height="4" fill="#F97316"/>
+  <rect x="6" y="20" width="12" height="4" fill="#F97316"/>
+  <!-- 白色的 A：4 格宽、5 行高，落在圆角块中间 -->
+  <rect x="10" y="4" width="4" height="4" fill="#FFFFFF"/>
+  <rect x="8" y="8" width="2" height="4" fill="#FFFFFF"/>
+  <rect x="14" y="8" width="2" height="4" fill="#FFFFFF"/>
+  <rect x="8" y="12" width="8" height="4" fill="#FFFFFF"/>
+  <rect x="8" y="16" width="2" height="4" fill="#FFFFFF"/>
+  <rect x="14" y="16" width="2" height="4" fill="#FFFFFF"/>
+  <rect x="8" y="20" width="2" height="4" fill="#FFFFFF"/>
+  <rect x="14" y="20" width="2" height="4" fill="#FFFFFF"/>
+</svg>

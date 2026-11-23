@@ -2,6 +2,19 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.10.6] - 2026-11-23
+
+### 新增
+
+- 内置 argocd（Argo CD 命令行）：资产是 `argocd-<os>-<arch>`，校验文件是 `cli_checksums.txt`，和别的工具走同一套下载、校验、升级。跟 glab / kubectl 一样不接管 brew 装的那份，`hmck install argocd` 才往 hmck 自己的目录装一份；版本号问 `argocd version --client`，不连集群
+- 工具目录条目支持 `checksums_file`：校验文件不叫 `checksums.txt` 的工具也能校验（argo-cd 这类）
+
+### 变更
+
+- 招牌缩到 6 列 × 3 行（原来 12 × 6），列表一屏能多放一倍的工具；形状还是照终端网格手摆的像素画，只是取样点少了一半
+- npm-token 按新网格重画，argocd 有了自己的橙色圆角块加白 A 招牌
+- 版本号里的构建信息（`v3.6.2+edd8eb6` 的 `+edd8eb6`）不再参与比较，装完不会还显示可升级
+
 ## [0.10.5] - 2026-11-23
 
 ### 新增

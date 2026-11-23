@@ -45,6 +45,17 @@
       "version_args": ["version", "--client"]
     },
     {
+      "key": "argocd",
+      "name": "argocd",
+      "desc": "Argo CD 命令行：应用、同步、回滚都在终端里",
+      "repo": "argoproj/argo-cd",
+      "asset": "argocd-{goos}-{goarch}{ext}",
+      "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64", "windows/amd64"],
+      "checksums": true,
+      "checksums_file": "cli_checksums.txt",
+      "version_args": ["version", "--client"]
+    },
+    {
       "key": "hmck",
       "name": "hmck",
       "desc": "管理这些命令行小工具，包括它自己",
