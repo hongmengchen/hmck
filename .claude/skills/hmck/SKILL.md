@@ -1,6 +1,6 @@
 ---
 name: hmck
-description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、glab、kubectl 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态和集群连通性、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「卸载某个工具 / 卸载 hmck」「自动更新」「新增一个工具让 hmck 管理」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
+description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、glab、kubectl 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态和集群连通性、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「卸载某个工具 / 卸载 hmck」「自动更新」「新增一个工具让 hmck 管理」「hmck 都能装什么 / 工具目录」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
 ---
 
 # hmck
@@ -30,6 +30,8 @@ CLI 的每个动作都有对应命令，输出也可以 `--json`。
 ```bash
 hmck list              # 纯文本表格：NAME / 已安装 / 最新 / 状态
 hmck list --json       # 给脚本/agent 解析
+hmck catalog           # 在线工具目录：hmck 能装什么，带本机状态
+hmck catalog --json    # 给脚本/agent 解析
 hmck info glab         # 一个工具的详情，包括 glab 的登录状态（--json 给脚本）
 hmck info kubectl      # 当前 context、API server、服务端版本、连不连得上
 hmck version
@@ -64,6 +66,11 @@ hmck 只跑 `glab auth status`、`kubectl config view --minify`、`kubectl versi
 `releases/permalink/latest`），失败再退回 API。kubectl 走 `dl.k8s.io`：最新版读 `stable.txt`，资产按平台分目录下载，
 校验的是资产旁边同名的 `.sha256`。
 
+`hmck catalog` 看的是**在线工具目录**（`hongmengchen/hmck` 仓库的 `docs/catalog.json`）：hmck 能装的所有工具，
+每条带本机状态（版本号 / 未添加 / 未安装 / 本平台没有 / PATH 上已有一份）。它只查本机，不联网查版本。
+线上读不到时用编进程序的内置副本，stderr 会说清原因；`HMCK_CATALOG_URL` 可以换地址。
+`catalog --json` 每条形如 `{"key","name","desc","repo","host","platforms","managed","installed","foreign","available","source"}`。
+
 ## 2. 安装 / 升级 / 启动
 
 ```bash
@@ -86,6 +93,8 @@ hmck run npm-token --help       # 直接启动工具，后面的参数原样传�
 - `hmck run` 会透传退出码，脚本里可以直接用。
 
 TUI（只有用户自己在终端里用）：`↑↓` 选择，`enter` 启动（没装则安装；选到 hmck 自己是升级），
+`n` 打开工具目录（每行一个 hmck 能装的工具，右边是本机状态：版本号 / 未添加 / 未安装 / 本平台没有，
+`enter` 加入并安装，已加入的直接装或升级，`r` 重新拉目录；目录里按 `a` 才是按仓库新增，填仓库、key、说明），
 `u` 升级选中的，`U` 一键升级所有可升级的，`i` 看信息页，`g` 看更新日志，`d` 卸载，
 `s` 装/刷新 agent skill，`r` 重新检查，`q` 退出。
 卡片上版本号前的图标就是状态：`✓` 已是最新、`↑` 可更新（`旧 → 新`）、`↓` 已下载待安装、
@@ -161,7 +170,24 @@ hmck skill --no-tools   # 只装 hmck 自己的
 
 ## 4. 以后新增一个工具
 
-**首选：不用重新编译 hmck**，直接加一条本机配置：
+**第一选择：加进线上工具目录，所有人都能用，不用发新版 hmck。** 在 hmck 仓库的
+`docs/catalog.json`（`main` 分支）的 `tools` 里加一条——hmck 打开目录页或跑 `hmck catalog`
+时现拉这份文件：
+
+```json
+{"key": "my-tool", "name": "my-tool", "desc": "一句话说明", "repo": "owner/my-tool",
+ "platforms": ["darwin/arm64", "linux/amd64", "windows/amd64"], "checksums": true}
+```
+
+`key`、`repo` 必填；其余可选：`name`、`desc`、`host`（`github` 默认、`gitlab`、`kubernetes`）、
+`platforms`（不写按六个常见平台记）、`checksums`、`asset`（资产名模板，`{ver}`/`{goos}`/`{goarch}`/`{ext}`）、
+`archive`、`bin_path`、`skill`、`post_install`、`version_args`。
+单条写坏只跳过那一条并计数，不影响整份目录；但内置工具的 key 一律以程序里的定义为准，
+目录里怎么写都改不了它从哪装、怎么校验。线上拉不到（离线、GitHub 不通）时 hmck 退回编进程序的
+同一份内置副本并在页面上注明；`HMCK_CATALOG_URL` 可指向自己的镜像。
+
+**只给这台机器用：写进本机配置。** 用户自己在终端里时，工具目录页按 `a`
+就能填仓库、key、说明，`enter` 存进配置并接着安装；让 agent 代做时用：
 
 ```bash
 hmck add owner/repo                  # 自动推断 key、平台、有没有 checksums.txt
