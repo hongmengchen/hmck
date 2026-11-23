@@ -52,6 +52,7 @@ const (
 	confirmUninstall
 	addTool
 	catalog
+	syncPage
 )
 
 type resultLine struct {
@@ -105,6 +106,34 @@ type tuiModel struct {
 
 	cat    catalogView // 线上工具目录
 	catGen int         // 目录也认代次，连按 r 不会让旧结果盖掉新的
+
+	sync syncView // 多端同步页
+}
+
+type syncMode int
+
+const (
+	syncIdle syncMode = iota // 菜单
+	syncPass                 // 在页面里输入同步密码
+	syncPath                 // 在页面里输入要同步的路径
+)
+
+// syncView 是多端同步页的状态。密码只在当前这次 push/pull 里用，
+// 输入完交给后台命令后就清掉，不写盘、不进命令行参数。
+type syncView struct {
+	mode   syncMode
+	cursor int
+	busy   bool   // 正在和 GitHub 通信
+	msg    string // 上次动作的结果
+	err    string // 上次动作失败的原因
+
+	action    string // 等密码回来后要执行的动作
+	pass      string // 正在输入的密码
+	passFirst string // 需要输两遍时，第一遍记在这里
+	confirm   bool   // 这次密码要输两遍
+
+	path     string // 正在输入的同步路径
+	offArmed bool   // 忘掉密钥要按两次：第一次只是提醒
 }
 
 // catalogView 是工具目录页：线上目录里的工具 + 本机自己加的自定义工具
@@ -221,6 +250,15 @@ type syncDoneMsg struct {
 	err error
 }
 
+// syncActionMsg 是同步页上 push/pull/off 跑完的结果；
+// reload 表示远端可能改了配置和工具清单，页面要重新读一遍
+type syncActionMsg struct {
+	action string
+	msg    string
+	err    error
+	reload bool
+}
+
 type uninstallDoneMsg struct{ res uninstallResult }
 
 type installResult struct {
@@ -280,12 +318,7 @@ func newTUIModel() tuiModel {
 	if err != nil {
 		m.cfgErr = err.Error()
 	}
-	if st, err := loadSyncState(); err == nil && syncEnabled(st) {
-		m.syncLine = "同步 " + st.Repo + "（工具退出后自动推）"
-		if st.LastPush != "" {
-			m.syncLine += " · 上次推送 " + st.LastPush
-		}
-	}
+	m.refreshSyncLine()
 
 	// 工具清单只读本机配置，先摆出来；版本和路径随后补上
 	tools, terr := allTools()
@@ -561,6 +594,75 @@ func autoSyncCmd() tea.Cmd {
 	}
 }
 
+// syncRunCmd 在后台跑一次同步动作。pass 由同步页输入框直接传进来，
+// 不经过终端读密码——alt screen 正开着，term.ReadPassword 会打架。
+func syncRunCmd(action, pass string) tea.Cmd {
+	return func() tea.Msg {
+		switch action {
+		case "push", "forcepush":
+			msg, err := syncPush(syncOptions{pass: pass, force: action == "forcepush", quiet: true})
+			return syncActionMsg{action: action, msg: msg, err: err}
+		case "pull":
+			msg, err := syncPull(syncOptions{pass: pass})
+			return syncActionMsg{action: action, msg: msg, err: err, reload: err == nil}
+		case "preview":
+			msg, err := syncPull(syncOptions{pass: pass, dryRun: true})
+			return syncActionMsg{action: action, msg: msg, err: err}
+		case "forcepull":
+			msg, err := syncPull(syncOptions{pass: pass, force: true})
+			return syncActionMsg{action: action, msg: msg, err: err, reload: err == nil}
+		case "off":
+			repo, err := disableSync()
+			if err != nil {
+				return syncActionMsg{action: action, err: err}
+			}
+			msg := "已忘掉本机的仓库和同步密钥（远端数据没动）"
+			if repo != "" {
+				msg += "；远端 " + repo + " 里的数据还在"
+			}
+			return syncActionMsg{action: action, msg: msg}
+		}
+		return syncActionMsg{action: action, err: fmt.Errorf("未知的同步动作 %q", action)}
+	}
+}
+
+// refreshSyncLine 用本机的 sync.json 重算列表上那一行同步状态
+func (m *tuiModel) refreshSyncLine() {
+	st, err := loadSyncState()
+	if err != nil || !syncEnabled(st) {
+		m.syncLine = ""
+		return
+	}
+	line := "同步 " + st.Repo + " · 工具退出后自动推 · y 管理"
+	if st.LastPush != "" {
+		line += " · 上次推送 " + st.LastPush
+	}
+	m.syncLine = line
+}
+
+// reloadConfigFromDisk 在 pull 之后重读配置和工具清单：
+// 远端可能改了工具列表和开关，页面得跟着变
+func (m *tuiModel) reloadConfigFromDisk() tea.Cmd {
+	if cfg, err := loadConfig(); err == nil {
+		m.cfg = cfg
+		m.cfgErr = ""
+	} else {
+		m.cfgErr = err.Error()
+	}
+	if tools, err := allTools(); err == nil {
+		m.states = make([]toolState, len(tools))
+		for i, t := range tools {
+			m.states[i] = toolState{Tool: t}
+		}
+		m.clampCursor()
+	}
+	m.localReady = false
+	m.checkedAt = time.Time{}
+	m.chkGen++
+	m.pending = map[string]bool{}
+	return tea.Batch(m.spin.Tick, localInspectCmd(m.toolList()))
+}
+
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -782,6 +884,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.msg != "":
 			m.syncLine = "同步 " + msg.msg
 		}
+
+	case syncActionMsg:
+		m.sync.busy = false
+		if msg.err != nil {
+			m.sync.msg = ""
+			m.sync.err = msg.err.Error()
+			m.syncLine = "同步失败：" + msg.err.Error()
+		} else {
+			m.sync.err = ""
+			m.sync.msg = msg.msg
+			m.refreshSyncLine()
+		}
+		if msg.reload {
+			return m, m.reloadConfigFromDisk()
+		}
 	}
 	return m, nil
 }
@@ -922,6 +1039,10 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m.startCatalog()
+		case "y":
+			m.state = syncPage
+			m.sync = syncView{}
+			return m, nil
 		case "r":
 			return m.refresh()
 		case "q", "esc":
@@ -1076,6 +1197,201 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "q":
 			return m, tea.Quit
 		}
+
+	case syncPage:
+		return m.handleSyncKey(k)
+	}
+	return m, nil
+}
+
+// syncItem 是同步页菜单里的一项
+type syncItem struct {
+	action string
+	label  string
+	desc   string
+}
+
+// syncItems 按本机是否已经连过同步给出菜单：没连过只留「开始」和「接上」，
+// 免得第一屏就摆一堆还用不上的强制覆盖
+func (m tuiModel) syncItems() []syncItem {
+	st, _ := loadSyncState()
+	if !syncEnabled(st) {
+		return []syncItem{
+			{"push", "开始同步（首次推送）", "在 GitHub 建私有仓库，把配置加密后推上去；要设一个同步密码"},
+			{"pull", "从已有仓库拉取", "另一台设备推过之后，在这里输入同一个密码接上"},
+		}
+	}
+	return []syncItem{
+		{"push", "推送本机配置", "把本机改动加密后推上去"},
+		{"pull", "拉取远端配置", "把远端较新的配置写回本机"},
+		{"preview", "预览远端会改哪些文件", "只解密看清单，不动本机文件"},
+		{"forcepush", "强制推送（覆盖远端）", "远端有别的设备的新版本时也拿本机覆盖"},
+		{"forcepull", "强制拉取（覆盖本机）", "本机有没推上去的改动也覆盖"},
+		{"addpath", "添加要同步的文件", "额外同步 config:… / home:… / ~/… 下的文件"},
+		{"off", "忘掉本机的仓库和密钥", "远端仓库里的数据不动"},
+	}
+}
+
+// handleSyncKey 管同步页：菜单、密码输入、路径输入三种状态
+func (m tuiModel) handleSyncKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.sync.busy {
+		return m, nil // 正在和 GitHub 通信：等结果，ctrl+c 仍然能退出
+	}
+	switch m.sync.mode {
+	case syncPass:
+		return m.handleSyncPassKey(k)
+	case syncPath:
+		return m.handleSyncPathKey(k)
+	}
+
+	items := m.syncItems()
+	if m.sync.cursor >= len(items) {
+		m.sync.cursor = len(items) - 1
+	}
+	if m.sync.cursor < 0 {
+		m.sync.cursor = 0
+	}
+	switch k.String() {
+	case "esc":
+		m.state = list
+		m.sync = syncView{}
+	case "q":
+		return m, tea.Quit
+	case "up", "k":
+		if m.sync.cursor > 0 {
+			m.sync.cursor--
+		}
+		m.sync.offArmed = false
+	case "down", "j":
+		if m.sync.cursor < len(items)-1 {
+			m.sync.cursor++
+		}
+		m.sync.offArmed = false
+	case "enter":
+		return m.syncChoose(items[m.sync.cursor])
+	}
+	return m, nil
+}
+
+func (m tuiModel) syncChoose(it syncItem) (tea.Model, tea.Cmd) {
+	switch it.action {
+	case "addpath":
+		m.sync.mode = syncPath
+		m.sync.path = ""
+		m.sync.err, m.sync.msg = "", ""
+		return m, nil
+	case "off":
+		// 忘掉密钥是不可逆的（远端数据还在，但密码再也没人记得就解不开了），按两次
+		if !m.sync.offArmed {
+			m.sync.offArmed = true
+			m.sync.err, m.sync.msg = "", "再按一次 enter：只让本机忘掉密钥和仓库，远端数据不动"
+			return m, nil
+		}
+		m.sync.offArmed = false
+		m.sync.busy = true
+		m.sync.err, m.sync.msg = "", ""
+		return m, syncRunCmd("off", "")
+	}
+
+	m.sync.offArmed = false
+	st, _ := loadSyncState()
+	if st.Key == "" {
+		// 本机没记住密钥：先从密码算出钥匙，再让后台执行
+		m.sync.mode = syncPass
+		m.sync.action = it.action
+		m.sync.pass, m.sync.passFirst = "", ""
+		// 第一次推送是设密码，要输两遍；拉取/预览只输一遍
+		m.sync.confirm = it.action == "push" || it.action == "forcepush"
+		m.sync.err, m.sync.msg = "", ""
+		return m, nil
+	}
+	m.sync.busy = true
+	m.sync.err, m.sync.msg = "", ""
+	return m, syncRunCmd(it.action, "")
+}
+
+// handleSyncPassKey 在页面里收同步密码：掩码显示，输完才交给后台命令。
+// 第一次推送输入两遍，确认没打错——密码丢了远端数据就解不开了。
+func (m tuiModel) handleSyncPassKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case k.String() == "esc":
+		m.sync.mode = syncIdle
+		m.sync.pass, m.sync.passFirst = "", ""
+		m.sync.confirm = false
+		return m, nil
+	case k.String() == "enter":
+		if strings.TrimSpace(m.sync.pass) == "" {
+			m.sync.err = "同步密码不能为空"
+			return m, nil
+		}
+		if m.sync.confirm && m.sync.passFirst == "" {
+			m.sync.passFirst = m.sync.pass
+			m.sync.pass = ""
+			m.sync.err = ""
+			return m, nil
+		}
+		if m.sync.confirm && m.sync.pass != m.sync.passFirst {
+			m.sync.passFirst, m.sync.pass = "", ""
+			m.sync.err = "两次输入的密码不一样"
+			return m, nil
+		}
+		action, pass := m.sync.action, m.sync.pass
+		m.sync.mode = syncIdle
+		m.sync.pass, m.sync.passFirst = "", ""
+		m.sync.confirm = false
+		m.sync.busy = true
+		m.sync.err, m.sync.msg = "", ""
+		return m, syncRunCmd(action, pass)
+	case k.String() == "backspace":
+		if r := []rune(m.sync.pass); len(r) > 0 {
+			m.sync.pass = string(r[:len(r)-1])
+		}
+		m.sync.err = ""
+		return m, nil
+	case k.Type == tea.KeyRunes:
+		// 密码不会特别长，挡一下粘贴进来的大段文字
+		if r := []rune(m.sync.pass); len(r) < 256 {
+			m.sync.pass += string(k.Runes)
+		}
+		m.sync.err = ""
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m tuiModel) handleSyncPathKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case k.String() == "esc":
+		m.sync.mode = syncIdle
+		m.sync.path = ""
+		return m, nil
+	case k.String() == "enter":
+		name, added, err := addSyncPath(m.sync.path)
+		if err != nil {
+			m.sync.err = err.Error()
+			return m, nil
+		}
+		m.sync.mode = syncIdle
+		m.sync.path = ""
+		m.sync.err = ""
+		if added {
+			m.sync.msg = "已加入同步清单: " + name + "（回到菜单选「推送本机配置」推一次）"
+		} else {
+			m.sync.msg = name + " 已经在同步清单里了"
+		}
+		return m, nil
+	case k.String() == "backspace":
+		if r := []rune(m.sync.path); len(r) > 0 {
+			m.sync.path = string(r[:len(r)-1])
+		}
+		m.sync.err = ""
+		return m, nil
+	case k.Type == tea.KeyRunes:
+		if r := []rune(m.sync.path); len(r) < 512 {
+			m.sync.path += string(k.Runes)
+		}
+		m.sync.err = ""
+		return m, nil
 	}
 	return m, nil
 }
@@ -1127,6 +1443,9 @@ func (m tuiModel) animating() bool {
 	}
 	if m.state == catalog {
 		return m.cat.loading
+	}
+	if m.state == syncPage {
+		return m.sync.busy
 	}
 	return m.state == list && (!m.localReady || len(m.pending) > 0)
 }
@@ -1488,6 +1807,8 @@ func (m tuiModel) View() string {
 		body = m.viewAdd()
 	case catalog:
 		body = m.viewCatalog()
+	case syncPage:
+		body = m.viewSync()
 	}
 	return "\n" + body + "\n"
 }
@@ -1507,6 +1828,50 @@ func (m tuiModel) withLogo(lines ...string) string {
 }
 
 func (m tuiModel) viewList() string {
+	body := m.viewListBody(false, 0)
+	if m.height <= 0 || strings.Count(body, "\n")+3 <= m.height {
+		return body
+	}
+	// 终端不够高：先换成「一行一个工具」的紧凑版
+	compact := m.viewListBody(true, 0)
+	if strings.Count(compact, "\n")+3 <= m.height {
+		return compact
+	}
+	// 还是放不下（工具很多）：只画光标附近那几行，标题和提示始终留在屏上
+	return m.viewListBody(true, max(m.height-2-m.listFixedLines(), 1))
+}
+
+// listFixedLines 是列表区以外固定要占的行：招牌 3 行、同步/错误提示、
+// 列表上下各一个空行、按键提示（按键提示窄屏会折行，按实际行数算）
+func (m tuiModel) listFixedLines() int {
+	n := logoRowsN + 2
+	if m.syncLine != "" {
+		n++
+	}
+	if m.configErr != "" {
+		n++
+	}
+	if m.cfgErr != "" {
+		n++
+	}
+	n += strings.Count(m.listHints(), "\n") + 1
+	return n
+}
+
+func (m tuiModel) listHints() string {
+	return m.viewHints("↑↓", "选择", "enter", "启动/安装", "n", "工具目录", "u", "升级", "U", "全部更新",
+		"i", "信息", "g", "更新日志", "y", "同步", "d", "卸载", "s", "装 skill", "r", "重新检查", "q", "退出")
+}
+
+// listRow 是紧凑列表里的一行：分组标题或某个工具
+type listRow struct {
+	kind string // 非空 = 分组标题
+	idx  int    // 工具下标；标题行是 -1
+}
+
+// viewListBody 画列表。compact 时一个工具一行；budget > 0 时只画窗口里那几行，
+// 光标所在行和它的分组标题尽量留在窗口里。
+func (m tuiModel) viewListBody(compact bool, budget int) string {
 	var b strings.Builder
 	w := m.contentWidth()
 	cols := m.cardCols()
@@ -1540,14 +1905,16 @@ func (m tuiModel) viewList() string {
 		styles.Dim.Render(summary),
 		m.viewSwitches(),
 	}
-	if m.syncLine != "" {
-		line := styles.Dim.Render(theme.Truncate(m.syncLine, w))
-		if strings.HasPrefix(m.syncLine, "同步失败") {
-			line = styles.Warn.Render(theme.Truncate(m.syncLine, w))
-		}
-		header = append(header, line)
-	}
 	b.WriteString(m.withLogo(header...))
+	// 同步状态单独占一行：withLogo 只接招牌高度的文字，第四行会被吞掉
+	if m.syncLine != "" {
+		line := styles.Dim.Render(theme.Truncate(m.syncLine, w-2))
+		if strings.HasPrefix(m.syncLine, "同步失败") {
+			line = styles.Warn.Render(theme.Truncate(m.syncLine, w-2))
+		}
+		b.WriteString("  " + line)
+		b.WriteString("\n")
+	}
 	if m.configErr != "" {
 		b.WriteString(styles.Warn.Render("  自定义工具配置有问题: " + theme.Truncate(m.configErr, w)))
 		b.WriteString("\n")
@@ -1563,30 +1930,169 @@ func (m tuiModel) viewList() string {
 	for _, st := range m.states {
 		counts[toolKind(st.Tool)]++
 	}
+	if compact {
+		m.writeCompactList(&b, cols, counts, budget)
+	} else {
+		lastKind := ""
+		for i, st := range m.states {
+			kind := toolKind(st.Tool)
+			if kind != lastKind {
+				if i > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString("  " + styleGroup.Render(kindTitle(kind)) +
+					styles.Dim.Render(fmt.Sprintf(" · %d 个", counts[kind])))
+				b.WriteString("\n")
+				lastKind = kind
+			}
+			b.WriteString(m.renderCard(st, i == m.cursor, cols))
+			b.WriteString("\n")
+			// 同一栏里工具之间用一条淡线隔开；换栏时靠标题和空行分，不再画线
+			if i < len(m.states)-1 && toolKind(m.states[i+1].Tool) == kind {
+				b.WriteString("  " + styleRule.Render(strings.Repeat("─", w)))
+				b.WriteString("\n")
+			}
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(m.listHints())
+	return b.String()
+}
+
+func (m tuiModel) writeCompactList(b *strings.Builder, cols cardCols, counts map[string]int, budget int) {
+	var rows []listRow
 	lastKind := ""
 	for i, st := range m.states {
 		kind := toolKind(st.Tool)
 		if kind != lastKind {
-			if i > 0 {
-				b.WriteString("\n")
-			}
-			b.WriteString("  " + styleGroup.Render(kindTitle(kind)) +
-				styles.Dim.Render(fmt.Sprintf(" · %d 个", counts[kind])))
-			b.WriteString("\n")
+			rows = append(rows, listRow{kind: kind, idx: -1})
 			lastKind = kind
 		}
-		b.WriteString(m.renderCard(st, i == m.cursor, cols))
-		b.WriteString("\n")
-		// 同一栏里工具之间用一条淡线隔开；换栏时靠标题和空行分，不再画线
-		if i < len(m.states)-1 && toolKind(m.states[i+1].Tool) == kind {
-			b.WriteString("  " + styleRule.Render(strings.Repeat("─", w)))
-			b.WriteString("\n")
+		rows = append(rows, listRow{idx: i})
+	}
+	cur := 0
+	for i, r := range rows {
+		if r.idx == m.cursor {
+			cur = i
+			break
 		}
 	}
-	b.WriteString("\n")
-	b.WriteString(m.viewHints("↑↓", "选择", "enter", "启动/安装", "n", "工具目录", "u", "升级", "U", "全部更新",
-		"i", "信息", "g", "更新日志", "d", "卸载", "s", "装 skill", "r", "重新检查", "q", "退出"))
-	return b.String()
+
+	start, end := 0, len(rows)
+	topHidden, bottomHidden := 0, 0
+	if budget > 0 && len(rows) > budget {
+		n := budget
+		start = cur - n/2
+		if start < 0 {
+			start = 0
+		}
+		if start+n > len(rows) {
+			start = len(rows) - n
+		}
+		end = start + n
+		// 光标上面那行分组标题能一起放进来就带上，免得看不到自己在哪一栏
+		g := -1
+		for i := cur; i >= 0; i-- {
+			if rows[i].idx < 0 {
+				g = i
+				break
+			}
+		}
+		if g >= 0 && g < start && cur-g+1 <= n {
+			start = g
+			end = start + n
+			if end > len(rows) {
+				end = len(rows)
+				start = end - n
+			}
+		}
+		// 提示行占掉的位置从窗口两端让出来，光标那行不会被挤掉
+		if start > 0 && start < cur {
+			start++
+			topHidden = start
+		}
+		if end < len(rows) && end-1 > cur {
+			end--
+			bottomHidden = len(rows) - end
+		}
+	}
+	if topHidden > 0 {
+		b.WriteString("  " + styles.Dim.Render(fmt.Sprintf("↑ 上面还有 %d 行", topHidden)))
+		b.WriteString("\n")
+	}
+	for i := start; i < end; i++ {
+		r := rows[i]
+		if r.idx < 0 {
+			b.WriteString("  " + styleGroup.Render(kindTitle(r.kind)) +
+				styles.Dim.Render(fmt.Sprintf(" · %d 个", counts[r.kind])))
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString(m.renderCompactCard(m.states[r.idx], r.idx == m.cursor, cols))
+		b.WriteString("\n")
+	}
+	if bottomHidden > 0 {
+		b.WriteString("  " + styles.Dim.Render(fmt.Sprintf("↓ 下面还有 %d 行", bottomHidden)))
+		b.WriteString("\n")
+	}
+}
+
+// renderCompactCard 是紧凑版卡片：一个工具一行，不带招牌、没有分隔线。
+// 终端高度不够时用它，标题、分组和按键提示就能留在同一屏里。
+func (m tuiModel) renderCompactCard(st toolState, selected bool, cols cardCols) string {
+	w := max(m.contentWidth()-2, 24) // 卡片自己占掉左边框和缩进 2 列
+
+	nameStyle := styleNameOff
+	if selected {
+		nameStyle = styleNameOn
+	}
+	head := nameStyle.Render(theme.Pad(st.Tool.Key, cols.name)) + "  " +
+		theme.Pad(m.versionCell(st), cols.ver)
+
+	desc := st.Tool.Desc
+	hint, hintStyle := "", styles.Dim
+	switch {
+	case !m.localReady:
+		desc, hint = "", "  读取中…"
+	case st.Installed == "" && st.CheckErr != "":
+		hint, hintStyle = "  "+st.CheckErr, styles.Warn
+	case st.Installed == "" && len(st.Foreign) > 0:
+		hint = "  ·  PATH 上已有一份"
+	case st.Installed == "":
+		hint = "  ·  按 enter 安装"
+	case st.Latest != "" && m.staged[st.Tool.Key] == st.Latest:
+		hint, hintStyle = "  ·  按 u 安装", styles.Good
+	case st.CheckErr != "":
+		hint, hintStyle = "  ·  "+st.CheckErr, styles.Warn
+	}
+
+	p := ""
+	if st.Path != "" {
+		p = shortenHome(st.Path)
+	}
+	avail := max(w-lipgloss.Width(head)-2, 10) // 名称和版本之后留给说明和路径
+	if p != "" && avail-lipgloss.Width(hint)-12 < lipgloss.Width(p) {
+		p = "" // 路径不能把说明挤没
+	}
+	room := avail - lipgloss.Width(hint) - lipgloss.Width(p) - 2
+	if room < 12 && hint != "" {
+		hint, hintStyle = "", styles.Dim // 放不下提示就只留说明
+		room = avail - lipgloss.Width(p) - 2
+	}
+	room = max(room, 4)
+
+	line := head + "  " + stylePath.Render(theme.Truncate(desc, room))
+	if hint != "" {
+		line += hintStyle.Render(hint)
+	}
+	if p != "" {
+		line += strings.Repeat(" ", max(w-lipgloss.Width(line)-lipgloss.Width(p), 2)) +
+			stylePath.Render(p)
+	}
+	if selected {
+		return styleCardOn.Render(line)
+	}
+	return styles.CardOff.Render(line)
 }
 
 // viewHints 和 theme.Hints 一样，但窄终端会自动折成两行，不会把最后一个键提示切掉
@@ -2203,6 +2709,129 @@ func (m tuiModel) viewAdd() string {
 	b.WriteString("\n")
 	b.WriteString(m.viewHints("tab", "换一格", "enter", "添加并安装", "esc", "取消", "ctrl+c", "退出"))
 	return b.String()
+}
+
+// viewSync 是多端同步页：上面是本机状态，下面是能做的事。
+// 密码在页面里掩码输入，只用于这一次 push/pull，不落到任何文件里。
+func (m tuiModel) viewSync() string {
+	w := m.contentWidth()
+	st, stErr := loadSyncState()
+	items := m.syncItems()
+	if m.sync.cursor >= len(items) {
+		m.sync.cursor = max(len(items)-1, 0)
+	}
+
+	var b strings.Builder
+	b.WriteString(m.withLogo(
+		styles.Title.Render("多端同步")+styles.Dim.Render("  GitHub 私有仓库，加密存放"),
+		styles.Dim.Render(theme.Truncate(m.syncHeadline(st, stErr), w-2)),
+		styles.Dim.Render("密码只在输入时用一次，不上传、不落盘明文"),
+	))
+	b.WriteString("\n")
+
+	repo := st.Repo
+	if repo == "" {
+		repo = "(还没连；首次推送时自动建成 <用户名>/" + syncRepoName + ")"
+	}
+	keyLine := "没记住（推送/拉取时在页面里输）"
+	if st.Key != "" {
+		keyLine = "已记住（本机 sync.json，0600）"
+	}
+	type field struct{ k, v string }
+	fields := []field{
+		{"仓库", repo},
+		{"密钥", keyLine},
+	}
+	if names, err := syncNames(st); err == nil {
+		fields = append(fields, field{"文件", fmt.Sprintf("%d 个（含各工具自带的配置）", len(names))})
+	}
+	if len(st.ExtraPaths) > 0 {
+		fields = append(fields, field{"额外", strings.Join(st.ExtraPaths, "、")})
+	}
+	if st.LastPush != "" {
+		fields = append(fields, field{"上次推送", st.LastPush})
+	}
+	if st.LastPull != "" {
+		fields = append(fields, field{"上次拉取", st.LastPull})
+	}
+	keyW := 4
+	for _, f := range fields {
+		keyW = max(keyW, lipgloss.Width(f.k))
+	}
+	for _, f := range fields {
+		b.WriteString("  " + styles.Dim.Render(theme.Pad(f.k, keyW)) + "  " +
+			theme.Truncate(f.v, max(w-keyW-4, 10)) + "\n")
+	}
+	if st.LastError != "" {
+		b.WriteString("  " + styles.Warn.Render(theme.Truncate("上次失败 "+st.LastError, max(w-2, 10))) + "\n")
+	}
+	b.WriteString("\n")
+
+	labelW := 0
+	for _, it := range items {
+		labelW = max(labelW, lipgloss.Width(it.label))
+	}
+	labelW = min(labelW, max(w/2, 10))
+	descW := max(w-2-2-labelW-2, 10)
+	for i, it := range items {
+		marker, labelStyle := "  ", styles.Dim
+		if i == m.sync.cursor {
+			marker, labelStyle = styles.Accent.Render("▌ "), styles.Accent
+		}
+		b.WriteString("  " + marker +
+			labelStyle.Render(theme.Pad(theme.Truncate(it.label, labelW), labelW)) + "  " +
+			styles.Dim.Render(theme.Truncate(it.desc, descW)) + "\n")
+	}
+
+	switch {
+	case m.sync.busy:
+		b.WriteString("\n  " + m.spin.View() + "  " + styles.Dim.Render("正在和 GitHub 同步…") + "\n")
+	case m.sync.mode == syncPass:
+		b.WriteString("\n")
+		prompt := "同步密码"
+		if m.sync.confirm && m.sync.passFirst != "" {
+			prompt = "再输入一次"
+		}
+		masked := strings.Repeat("•", len([]rune(m.sync.pass)))
+		b.WriteString("  " + styles.Accent.Render(prompt) + "  " + styles.Accent.Render("> "))
+		if masked == "" {
+			b.WriteString(styles.Dim.Render("输入时不显示"))
+		} else {
+			b.WriteString(theme.Truncate(masked, max(w-18, 8)))
+		}
+		b.WriteString(styles.Accent.Render("█") + "\n")
+	case m.sync.mode == syncPath:
+		b.WriteString("\n  " + styles.Accent.Render("路径") + "  " + styles.Accent.Render("> ") +
+			theme.Truncate(m.sync.path, max(w-14, 8)) + styles.Accent.Render("█") + "\n")
+		b.WriteString("  " + styles.Dim.Render("如 ~/.config/foo/config.yaml、home:.ssh/config、config:foo/config.yaml") + "\n")
+	case m.sync.msg != "":
+		b.WriteString("\n  " + styles.Good.Render(theme.Truncate(m.sync.msg, max(w-2, 10))) + "\n")
+	}
+	if m.sync.err != "" {
+		b.WriteString("\n  " + styles.Bad.Render(theme.Truncate(m.sync.err, max(w-2, 10))) + "\n")
+	}
+
+	b.WriteString("\n")
+	switch m.sync.mode {
+	case syncPass:
+		b.WriteString(m.viewHints("enter", "确认", "esc", "取消", "ctrl+c", "退出"))
+	case syncPath:
+		b.WriteString(m.viewHints("enter", "加入同步", "esc", "取消", "ctrl+c", "退出"))
+	default:
+		b.WriteString(m.viewHints("↑↓", "选择", "enter", "执行", "esc", "返回", "ctrl+c", "退出"))
+	}
+	return b.String()
+}
+
+// syncHeadline 是同步页最上面那一句：连没连（推送/拉取时间在下面几行里）
+func (m tuiModel) syncHeadline(st syncState, err error) string {
+	if err != nil {
+		return "读本机同步状态失败：" + err.Error()
+	}
+	if !syncEnabled(st) {
+		return "这台机器还没连同步"
+	}
+	return "已连 " + st.Repo
 }
 
 // kindStyle 把信息行的 kind 翻成颜色：ok 绿、warn 黄、missing 红，其余用普通版本色

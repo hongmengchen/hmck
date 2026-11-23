@@ -176,6 +176,9 @@ hmck sync add ~/.npmrc       # 额外同步一个文件；hmck sync rm 去掉
 hmck sync off                # 本机忘掉仓库和密钥，远端数据不动
 ```
 
+TUI 列表上按 `y` 就是同一套能力的同步页：看状态、推送/拉取/预览、强制覆盖、`sync add` 的路径、
+忘掉本机密钥；本机没记住密钥时密码直接在页面里掩码输入（首次推送输两遍），只用于这一次请求。
+agent 仍然走上面的 CLI，不要启动 TUI。
 登录借 gh CLI（`gh auth token`），没登录先让用户跑 `gh auth login`；hmck 不保存 GitHub 凭据。
 加密是 PBKDF2-HMAC-SHA256（60 万次）+ AES-256-GCM，GitHub 上只有密文。
 同步内容：hmck 的 `config.json` / `tools.json`，各工具声明的配置（kube-token、npm-token、

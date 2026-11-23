@@ -25,6 +25,17 @@ type syncOptions struct {
 	dryRun    bool
 	passStdin bool
 	quiet     bool
+	// pass 是 TUI 在页面里输入的同步密码：只在内存里待这一次调用，
+	// 不写盘、不进命令行参数。
+	pass string
+}
+
+// passphrase 决定这次动作要不要向人要素材：TUI 已经给了就直接用，否则走终端/stdin。
+func (o syncOptions) passphrase(confirm bool) (string, error) {
+	if o.pass != "" {
+		return o.pass, nil
+	}
+	return readSyncPassphrase(o.passStdin, confirm)
 }
 
 func runSync(args []string) int {
@@ -320,7 +331,7 @@ func syncKeyForPush(st *syncState, remote []byte, remoteExists bool, opts syncOp
 		return key, nil
 	}
 
-	pass, err := readSyncPassphrase(opts.passStdin, !remoteExists)
+	pass, err := opts.passphrase(!remoteExists)
 	if err != nil {
 		return nil, err
 	}
@@ -530,7 +541,7 @@ func syncPull(opts syncOptions) (string, error) {
 			return "", errors.New("本机记住的密钥解不开远端数据（另一台设备换过密码？先 hmck sync off 再 pull）")
 		}
 	} else {
-		pass, err := readSyncPassphrase(opts.passStdin, false)
+		pass, err := opts.passphrase(false)
 		if err != nil {
 			return "", err
 		}
@@ -612,36 +623,49 @@ func mergeSyncPaths(local, remote []string) []string {
 	return out
 }
 
-func runSyncAdd(args []string) int {
-	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "用法: hmck sync add <路径>")
-		return 2
-	}
+// addSyncPath 把用户给的路径收进同步清单，返回存下来的逻辑名。
+// added=false 表示本来就在清单里；TUI 和 CLI 共用这一段。
+func addSyncPath(raw string) (name string, added bool, err error) {
 	st, err := loadSyncState()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
-		return 1
+		return "", false, err
 	}
-	name, err := normalizeSyncPath(args[0])
+	name, err = normalizeSyncPath(raw)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "错误: "+err.Error())
-		return 2
+		return "", false, err
 	}
 	if name == syncStateName {
-		fmt.Fprintln(os.Stderr, "sync.json 是本机的同步状态和密钥，不能同步")
-		return 2
+		return "", false, errors.New("sync.json 是本机的同步状态和密钥，不能同步")
 	}
 	for _, p := range st.ExtraPaths {
 		if p == name {
-			fmt.Printf("%s 已经在同步清单里了\n", name)
-			return 0
+			return name, false, nil
 		}
 	}
 	st.ExtraPaths = append(st.ExtraPaths, name)
 	sort.Strings(st.ExtraPaths)
 	if _, err := saveSyncState(st); err != nil {
-		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		return "", false, err
+	}
+	return name, true, nil
+}
+
+func runSyncAdd(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "用法: hmck sync add <路径>")
+		return 2
+	}
+	name, added, err := addSyncPath(args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "错误: "+err.Error())
+		if _, nerr := normalizeSyncPath(args[0]); nerr != nil {
+			return 2
+		}
 		return 1
+	}
+	if !added {
+		fmt.Printf("%s 已经在同步清单里了\n", name)
+		return 0
 	}
 	fmt.Printf("已加入同步清单: %s\n", name)
 	fmt.Println("运行 hmck sync push 推到远端")
@@ -686,20 +710,29 @@ func runSyncRemove(args []string) int {
 	return 0
 }
 
-func runSyncOff(args []string) int {
-	if len(args) > 0 {
-		fmt.Fprintln(os.Stderr, "用法: hmck sync off")
-		return 2
-	}
+// disableSync 让本机忘掉仓库和同步密钥；远端仓库和里面的数据不动。
+// 返回原来的仓库名，方便告诉用户远端还在哪。
+func disableSync() (string, error) {
 	st, err := loadSyncState()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
-		return 1
+		return "", err
 	}
 	repo := st.Repo
 	st.Repo, st.Key, st.Salt, st.Iter = "", "", nil, 0
 	st.LastSHA, st.LastHash, st.LastPush, st.LastPull, st.LastError = "", "", "", "", ""
 	if _, err := saveSyncState(st); err != nil {
+		return "", err
+	}
+	return repo, nil
+}
+
+func runSyncOff(args []string) int {
+	if len(args) > 0 {
+		fmt.Fprintln(os.Stderr, "用法: hmck sync off")
+		return 2
+	}
+	repo, err := disableSync()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		return 1
 	}
