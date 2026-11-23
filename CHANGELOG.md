@@ -2,6 +2,23 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.10.8] - 2026-11-23
+
+### 新增
+
+- 多端同步：`hmck sync` 把本机工具配置加密放进一个 GitHub 私有仓库（默认 `<用户名>/hmck-config`，第一次 push 自动创建），换台机器用同一个密码 `hmck sync pull` 拉回来。登录借 gh CLI（`gh auth token`），hmck 不保存 GitHub 凭据
+- 加密：PBKDF2-HMAC-SHA256（60 万次）派生密钥 + AES-256-GCM，GitHub 上只有密文；密钥缓存在配置目录的 `sync.json`（0600，不参与同步），新设备用密码重新派生
+- 同步清单：hmck 的 `config.json` / `tools.json`，加上各工具声明的配置（kube-token 的 `config.yaml`，npm-token 的 `config.json`，argo-token 的 `config.json`、`~/.argocd/token`、`~/.argocd/env`），还能 `hmck sync add` 额外路径；单文件 2 MiB、整包 8 MiB 上限
+- 保存后自动推：`hmck run <工具>` 退出、TUI 里改配置或增删工具后自动推一次，配置没变就跳过；同步没开启时静默，失败只提示、不改原命令退出码
+- `hmck sync`（`--json`）、`push`、`pull`（`--dry-run`）、`add`、`rm`、`off`；push/pull 支持 `--repo`、`--force`、`--passphrase-stdin`
+- push 先解开远端合并再上传，别的设备独有的配置不会被抹掉（同名以本机为准）；远端被别的设备推过新版本时提示先 pull
+- TUI 列表顶部显示一行同步状态，推送完成或失败后即时更新
+
+### 安全
+
+- 从远端拉下来的文件一律 0600；本机有未推送改动时 pull 会先拒绝，`--force` 才覆盖
+- `sync.json` 自身不进同步，避免把密钥推到远端
+
 ## [0.10.7] - 2026-11-23
 
 ### 新增

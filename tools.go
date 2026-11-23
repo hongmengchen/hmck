@@ -32,6 +32,9 @@ type tool struct {
 	Skill         bool     `json:"skill,omitempty"`        // 支不支持 `<tool> skill --quiet`
 	PostInstall   []string `json:"post_install,omitempty"` // 装完/升级后要跑的子命令（忽略失败）
 	VersionArgs   []string `json:"version_args,omitempty"` // 问版本号的子命令，默认 version；kubectl 用 version --client
+	// SyncPaths 是这个工具要跟着多端同步走的文件，写法见 hmck sync add：
+	// config:hmck/config.json（配置目录下）、home:.argocd/token（家目录下）
+	SyncPaths []string `json:"sync_paths,omitempty"`
 
 	// Kind 是列表里的归类：official（别人的官方 CLI，hmck 帮你看版本、装、升级）
 	// 或 own（我们自己的小工具，除了版本还能直接打开用）；本机自己 add 的另算一栏
@@ -101,6 +104,9 @@ var registry = []tool{
 		Checksums:   true,
 		Skill:       true,
 		PostInstall: []string{"skill", "--quiet"},
+		SyncPaths: []string{
+			"config:kube-token/config.yaml",
+		},
 	},
 	{
 		Key:    "npm-token",
@@ -117,6 +123,9 @@ var registry = []tool{
 		Checksums:   true,
 		Skill:       true,
 		PostInstall: []string{"skill", "--quiet"},
+		SyncPaths: []string{
+			"config:npm-token/config.json",
+		},
 	},
 	{
 		// 自家的 Argo CD token 配置 TUI：跟 kube-token / npm-token 一样，
@@ -135,6 +144,11 @@ var registry = []tool{
 		Checksums:   true,
 		Skill:       true,
 		PostInstall: []string{"skill", "--quiet"},
+		SyncPaths: []string{
+			"config:argo-token/config.json",
+			"home:.argocd/token",
+			"home:.argocd/env",
+		},
 	},
 	{
 		// glab 是 GitLab 官方 CLI，在 gitlab.com 发版，资产是 tar.gz / zip。

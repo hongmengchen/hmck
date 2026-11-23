@@ -1,6 +1,6 @@
 ---
 name: hmck
-description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、argo-token、glab、kubectl、argocd 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态和集群连通性、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「卸载某个工具 / 卸载 hmck」「自动更新」「新增一个工具让 hmck 管理」「hmck 都能装什么 / 工具目录」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
+description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、argo-token、glab、kubectl、argocd 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态和集群连通性、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「卸载某个工具 / 卸载 hmck」「自动更新」「多端同步配置 / hmck sync」「新增一个工具让 hmck 管理」「hmck 都能装什么 / 工具目录」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
 ---
 
 # hmck
@@ -23,6 +23,8 @@ CLI 的每个动作都有对应命令，输出也可以 `--json`。
 2. **不要擅自改用户的真实配置。** `~/.npmrc`、`~/.kube/config` 的写入交给 kube-token /
    npm-token 自己做（它们会自动备份、复验、必要时还原），agent 不要手改文件；
    argo-token 的 token 在 `~/.argocd/token`（0600），配置和 token 都交给它的 TUI / `set` 写，agent 不要 `cat`。
+   `hmck sync` 把配置加密同步到 GitHub 私有仓库，本机 `sync.json`（0600）里是派生后的密钥，
+   同样不要读、不要打印；同步密码只从用户手里拿，必要时用 `--passphrase-stdin` 传，别写进命令行参数或文件。
 3. **升级和卸载只走 hmck。** 不要用 `go install`、手动下载二进制或改 PATH 来「修好」某个工具，
    也不要手动 `rm` 来卸载；`hmck upgrade` 会校验 checksum 并原子替换，`hmck uninstall` 只删 hmck 装出来的那份，
    且要敲工具名确认——非交互环境只有用户明确同意后才加 `--yes`。
@@ -162,6 +164,30 @@ GitLab 工具如 glab 用 GitLab API）；
 
 配置写在 `hmck/config.json`（和 `tools.json` 同目录）。自动行为只在 TUI 里生效，
 `hmck list --json` 等脚本用途不会偷偷改动系统。
+
+## 多端同步
+
+```bash
+hmck sync                    # 状态：仓库、是否已记住密钥、上次推送/拉取、同步清单
+hmck sync --json             # 给脚本/agent 解析
+hmck sync push               # 加密推到 GitHub 私有仓库；第一次自动建 <用户名>/hmck-config
+hmck sync pull               # 另一台机器拉下来（--dry-run 只看会改什么）
+hmck sync add ~/.npmrc       # 额外同步一个文件；hmck sync rm 去掉
+hmck sync off                # 本机忘掉仓库和密钥，远端数据不动
+```
+
+登录借 gh CLI（`gh auth token`），没登录先让用户跑 `gh auth login`；hmck 不保存 GitHub 凭据。
+加密是 PBKDF2-HMAC-SHA256（60 万次）+ AES-256-GCM，GitHub 上只有密文。
+同步内容：hmck 的 `config.json` / `tools.json`，各工具声明的配置（kube-token、npm-token、
+argo-token 的配置和 `~/.argocd/token`），以及用户 `sync add` 的路径。
+
+- **保存后自动推**：`hmck run <工具>` 退出后、TUI 改完配置或增删工具后自动推一次，没变就跳过；
+  失败只提示，不影响原命令退出码。同步没开启时静默。
+- **拉取是手动的**，agent 不要自动 `pull`：它会覆盖本机文件。本机有未推改动时 pull 会拒绝，
+  `--force` 才覆盖——这属于改用户配置，先问。
+- push 会把远端独有的文件合进来（同名以本机为准），远端被别的设备推过新版本时会要求先 pull；
+  `--force` 同理要先问。
+- 非交互环境输密码用 `--passphrase-stdin`（从 stdin 读一行），不要把它放进参数。
 
 ## 3. 让 agent 读懂这些工具
 

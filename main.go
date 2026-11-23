@@ -14,7 +14,7 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.10.7"
+var version = "0.10.8"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -54,6 +54,8 @@ func run(args []string) int {
 		return runUninstall(rest)
 	case "skill":
 		return runSkill(rest)
+	case "sync":
+		return runSync(rest)
 	case "tui":
 		return runTUI()
 	case "version", "-v", "--version":
@@ -85,6 +87,7 @@ func usage(w io.Writer) {
   hmck uninstall <tool>    卸载 hmck 装的那份（要敲工具名确认；--keep-skill 保留 skill，--yes 跳过确认）
   hmck rm <tool>           删掉自定义工具的配置（内置的删不了）
   hmck skill               给 hmck 和已安装的工具装 agent skill
+  hmck sync [push|pull]    多端同步配置（GitHub 私有仓库，加密）
   hmck version
   hmck help
 
@@ -365,6 +368,10 @@ func runRun(args []string) int {
 		}
 		fmt.Fprintf(os.Stderr, "启动 %s 失败: %v\n", t.Key, err)
 		return 1
+	}
+	// 工具刚用过，配置可能变了：开了同步就顺手推一把（没变会自己跳过）
+	if len(t.SyncPaths) > 0 {
+		autoSyncAfterToolRun()
 	}
 	return 0
 }
@@ -667,6 +674,7 @@ func runAdd(args []string) int {
 	}
 	fmt.Printf("配置    %s\n", shortenHome(path))
 	fmt.Printf("\n接下来: hmck install %s\n", t.Key)
+	autoSyncAfterToolRun()
 	return 0
 }
 
@@ -688,6 +696,7 @@ func runRemove(args []string) int {
 	}
 	fmt.Printf("已从配置里删掉 %s\n配置    %s\n", fs.Arg(0), shortenHome(path))
 	fmt.Println("（已经装好的二进制没动；要删用 hmck uninstall " + fs.Arg(0) + "）")
+	autoSyncAfterToolRun()
 	return 0
 }
 

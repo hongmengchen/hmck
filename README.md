@@ -232,6 +232,10 @@ hmck info glab            # 版本、位置，glab 还有登录状态（--json �
 hmck info kubectl         # 当前 context、API server、服务端版本、连不连得上
 hmck uninstall npm-token  # 卸掉 hmck 装的那份（先敲工具名确认；--yes 跳过）
 hmck skill                # 给 hmck 和已安装的工具装 agent skill
+hmck sync                 # 多端同步状态（GitHub 私有仓库，加密）
+hmck sync push            # 把本机配置加密后推上去；第一次会建仓库、设密码
+hmck sync pull            # 换台机器，用同一个密码拉下来
+hmck sync add ~/.npmrc    # 额外同步一个文件
 ```
 
 版本检测：已安装版本读 `<tool> version`（kubectl 用 `version --client`，不连集群）；最新版看 GitHub `releases/latest` 的跳转（不消耗 API 限流），失败再退回 API。kubectl 走 `dl.k8s.io`：最新版读 `stable.txt`，资产按平台分目录下载，校验的是资产旁边同名的 `.sha256`。
@@ -248,6 +252,43 @@ glab 和 kubectl 是个例外（brew / apt 装的 glab、Docker Desktop 自带�
 
 hmck 自己也在托管列表里：已装版本是编译进二进制的版本号，升级路径就是当前正在运行的可执行文件；
 替换后旧进程仍是旧版本，退出重开（或 `hmck version`）即可确认。
+
+## 多端同步
+
+`hmck sync` 把本机的工具配置放进一个 **GitHub 私有仓库**，换台机器用同一个密码拉下来。
+仓库里只有密文：PBKDF2-HMAC-SHA256（60 万次）从密码派生密钥，AES-256-GCM 加密，
+GitHub（以及任何拿到仓库的人）看到的是一个 `.enc` 文件。
+
+**登录借 gh CLI**：hmck 用 `gh auth token` 拿 token，不另外保存 GitHub 凭据。
+没装或没登录就先 `gh auth login`。
+
+```bash
+hmck sync push            # 第一次：自动建 <你的用户名>/hmck-config（私有）、设置同步密码
+hmck sync                 # 看状态：仓库、上次推送/拉取、会同步哪些文件
+hmck sync pull            # 另一台机器：输同一个密码，把配置写回来
+hmck sync pull --dry-run  # 只看会改哪些文件，不动本机
+hmck sync add ~/.npmrc    # 额外同步一个文件（config:… / home:… 也行）
+hmck sync rm ~/.npmrc     # 不再同步它
+hmck sync off             # 本机忘掉仓库和密码（远端数据不动）
+```
+
+**默认同步哪些文件**：hmck 自己的 `config.json`、`tools.json`，加上每个工具声明的配置
+（kube-token 的 `config.yaml`，npm-token 的 `config.json`，argo-token 的 `config.json`、
+`~/.argocd/token`、`~/.argocd/env`）。本机没有的文件跳过；手工加的路径存在 `sync.json` 里一起走。
+单文件最大 2 MiB，整包最大 8 MiB。
+
+**什么时候推**：保存之后自动推，不用惦记——`hmck run <工具>` 退出后、TUI 里改完配置或
+新增/删除工具后都会顺手推一次；配置没变就跳过。同步没开启时什么都不做，推送失败只提示，不影响命令本身的退出码。
+**拉取是手动的**：另一台机器上 `hmck sync pull` 一次。拉之前本机有没推上去的改动会先提醒，
+确认覆盖加 `--force`。
+
+**多台机器不会互相抹配置**：push 会先解开远端、把别的设备独有的文件合进来再上传；
+同名文件以本机为准。远端被别的设备推过新版本时，会提示先 `pull`，确实要覆盖再加 `--force`。
+从远端写回的文件一律 0600。
+
+同步状态和密钥存在配置目录的 `sync.json`（0600，不进同步）：记住的是派生后的密钥而不是密码，
+所以后面 push/pull 不用重复输入；新设备仍然需要同一个密码。忘了密码、或另一台设备换过密码时，
+`hmck sync off` 后重新 `pull` 或 `push` 即可。测试用的仓库地址可以用 `HMCK_GITHUB_API` 指走。
 
 ## 新增一个工具
 

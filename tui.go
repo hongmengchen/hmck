@@ -76,6 +76,8 @@ type tuiModel struct {
 	cfgErr string            // 开关保存失败时的提示
 	staged map[string]string // 已预下载的版本：tool key -> version
 
+	syncLine string // 多端同步状态/结果，只在开启过同步时显示
+
 	// 本地扫完就上图，远端最新版在后台逐个回来
 	localReady bool
 	pending    map[string]bool
@@ -213,6 +215,12 @@ type installDoneMsg struct {
 
 type execDoneMsg struct{ err error }
 
+// syncDoneMsg 是工具退出后自动推送的结果；失败只占状态栏一行，不打断使用
+type syncDoneMsg struct {
+	msg string
+	err error
+}
+
 type uninstallDoneMsg struct{ res uninstallResult }
 
 type installResult struct {
@@ -271,6 +279,12 @@ func newTUIModel() tuiModel {
 	}
 	if err != nil {
 		m.cfgErr = err.Error()
+	}
+	if st, err := loadSyncState(); err == nil && syncEnabled(st) {
+		m.syncLine = "同步 " + st.Repo + "（工具退出后自动推）"
+		if st.LastPush != "" {
+			m.syncLine += " · 上次推送 " + st.LastPush
+		}
 	}
 
 	// 工具清单只读本机配置，先摆出来；版本和路径随后补上
@@ -539,6 +553,14 @@ func launchCmd(t tool, path string) tea.Cmd {
 	})
 }
 
+// autoSyncCmd 在工具退出后把可能改过的配置推上去；没开同步时几乎立刻返回。
+func autoSyncCmd() tea.Cmd {
+	return func() tea.Msg {
+		msg, err := autoSyncPush()
+		return syncDoneMsg{msg: msg, err: err}
+	}
+}
+
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -714,6 +736,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.states = append(m.states, st)
 		m.cursor = len(m.states) - 1
 		m.cat.err = ""
+		go autoSyncPush()
 		// 挑中就是为了装：写进配置后直接开始下载
 		return m.startInstall(st)
 
@@ -728,6 +751,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.states = append(m.states, st)
 		m.cursor = len(m.states) - 1
 		m.add = addView{}
+		go autoSyncPush()
 		// 加进来就是为了用：接着装，不用再按一次 enter
 		return m.startInstall(st)
 
@@ -749,6 +773,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.state = list
+		return m, autoSyncCmd()
+
+	case syncDoneMsg:
+		switch {
+		case msg.err != nil:
+			m.syncLine = "同步失败：" + msg.err.Error()
+		case msg.msg != "":
+			m.syncLine = "同步 " + msg.msg
+		}
 	}
 	return m, nil
 }
@@ -1421,6 +1454,8 @@ func (m *tuiModel) saveCfg() {
 		return
 	}
 	m.cfgErr = ""
+	// 开关也是同步内容：保存后顺手推一下（没开同步时什么都不做）
+	go autoSyncPush()
 }
 
 func (m *tuiModel) clampCursor() {
@@ -1500,11 +1535,19 @@ func (m tuiModel) viewList() string {
 	if !m.checkedAt.IsZero() {
 		summary += " · 检查于 " + m.checkedAt.Format("15:04:05")
 	}
-	b.WriteString(m.withLogo(
-		styles.Title.Render("hmck")+styles.Dim.Render("  我的命令行小工具"),
+	header := []string{
+		styles.Title.Render("hmck") + styles.Dim.Render("  我的命令行小工具"),
 		styles.Dim.Render(summary),
 		m.viewSwitches(),
-	))
+	}
+	if m.syncLine != "" {
+		line := styles.Dim.Render(theme.Truncate(m.syncLine, w))
+		if strings.HasPrefix(m.syncLine, "同步失败") {
+			line = styles.Warn.Render(theme.Truncate(m.syncLine, w))
+		}
+		header = append(header, line)
+	}
+	b.WriteString(m.withLogo(header...))
 	if m.configErr != "" {
 		b.WriteString(styles.Warn.Render("  自定义工具配置有问题: " + theme.Truncate(m.configErr, w)))
 		b.WriteString("\n")
