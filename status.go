@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -62,6 +63,19 @@ func runCapture(bin string, args ...string) (string, error) {
 	cmd.Env = append(os.Environ(), "HMCK_NO_MIGRATE=1")
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// runCaptureOut 和 runCapture 一样带超时，但把 stdout 和 stderr 分开：
+// kubectl 的 JSON 边上还会写报错，混在一起就解析不出来了
+func runCaptureOut(bin string, args ...string) (stdout, stderr string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = append(os.Environ(), "HMCK_NO_MIGRATE=1")
+	var eb strings.Builder
+	cmd.Stderr = &eb
+	out, err := cmd.Output()
+	return string(out), eb.String(), err
 }
 
 // parseGlabAuthStatus 解析 `glab auth status` 的输出。
@@ -219,6 +233,201 @@ func loginBadgeOf(logins []glabLogin) (string, string) {
 	return "", ""
 }
 
+// ---------- 集群状态（kubectl） ----------
+
+// kubeStatus 是 kubectl 眼里的当前集群：用哪个 context、连哪台服务器、连不连得上。
+// 只记名字、地址和版本，不读 kubeconfig 里的证书和 token。
+type kubeStatus struct {
+	Context       string
+	Cluster       string
+	Server        string
+	ServerVersion string
+	Reachable     bool
+	Note          string // 连不上时的一句话
+}
+
+// readKubeStatus 跑两条只读命令：一条读当前 context，一条连集群问服务端版本。
+// 两条失败也尽量给出结果——界面上要说清楚是「没有 context」还是「连不上」；
+// 两条都一个字都没吐出来时才当读不出来（二进制坏了之类）。
+func readKubeStatus(bin string) *kubeStatus {
+	cfgOut, cfgErr, _ := runCaptureOut(bin, "config", "view", "--minify", "-o", "json")
+	verOut, verErr, _ := runCaptureOut(bin, "version", "-o", "json", "--request-timeout=4s")
+
+	k := &kubeStatus{}
+	ctxName, cluster, server, cfgOK := parseKubeConfig(cfgOut)
+	k.Context, k.Cluster, k.Server = ctxName, cluster, server
+
+	// 连通性问服务端版本：拿到了就是连得上，顺带知道集群是哪个版本；
+	// 连不上 / token 过期时 kubectl 只给 clientVersion 和一行报错
+	if v := parseKubeServerVersion(verOut); v != "" {
+		k.Reachable = true
+		k.ServerVersion = v
+	}
+
+	switch {
+	case k.Context == "" && cfgErr != "":
+		// 没有当前 context 时 config view 自己会报 current-context must exist
+		k.Note = kubeConnectNote(cfgErr)
+	case !k.Reachable:
+		k.Note = kubeConnectNote(verErr)
+	}
+	if !cfgOK && strings.TrimSpace(cfgOut) == "" && strings.TrimSpace(verOut) == "" &&
+		strings.TrimSpace(cfgErr) == "" && strings.TrimSpace(verErr) == "" {
+		return nil
+	}
+	return k
+}
+
+// parseKubeConfig 从 `kubectl config view --minify -o json` 里取当前 context、
+// 集群名和 API server；kubeconfig 里的证书和 token 一概不碰
+func parseKubeConfig(out string) (ctx, cluster, server string, ok bool) {
+	var cfg struct {
+		CurrentContext string `json:"current-context"`
+		Clusters       []struct {
+			Name    string `json:"name"`
+			Cluster struct {
+				Server string `json:"server"`
+			} `json:"cluster"`
+		} `json:"clusters"`
+	}
+	if json.Unmarshal([]byte(out), &cfg) != nil {
+		return "", "", "", false
+	}
+	ctx = strings.TrimSpace(cfg.CurrentContext)
+	// --minify 后 clusters 里只剩当前 context 用的那个
+	if len(cfg.Clusters) > 0 {
+		cluster = cfg.Clusters[0].Name
+		server = cfg.Clusters[0].Cluster.Server
+	}
+	return ctx, cluster, server, true
+}
+
+// parseKubeServerVersion 从 `kubectl version -o json` 里取服务端版本；
+// 连不上时输出里只有 clientVersion，这里返回空
+func parseKubeServerVersion(out string) string {
+	var ver struct {
+		ServerVersion struct {
+			GitVersion string `json:"gitVersion"`
+		} `json:"serverVersion"`
+	}
+	if json.Unmarshal([]byte(out), &ver) != nil {
+		return ""
+	}
+	return strings.TrimSpace(ver.ServerVersion.GitVersion)
+}
+
+var kubeLogPrefix = regexp.MustCompile(`^[EW]\d{4} `) // klog 的 W1123 10:21:32.123 … 前缀
+
+// kubeConnectNote 把 kubectl 的报错压成一句人话
+func kubeConnectNote(out string) string {
+	line := ""
+	for _, raw := range strings.Split(out, "\n") {
+		s := strings.TrimSpace(raw)
+		if s == "" || kubeLogPrefix.MatchString(s) || strings.HasPrefix(strings.ToLower(s), "warning") {
+			continue
+		}
+		line = s
+		break
+	}
+	if line == "" {
+		return ""
+	}
+	low := strings.ToLower(line)
+	switch {
+	case strings.Contains(low, "must be logged in"), strings.Contains(low, "unauthorized"):
+		return "认证没通过：token 可能过期了（用 kube-token 换新）"
+	case strings.Contains(low, "current-context is not set"),
+		strings.Contains(low, "current-context must exist"),
+		strings.Contains(low, "no context"):
+		return "没有设置当前 context"
+	case strings.Contains(low, "i/o timeout"), strings.Contains(low, "context deadline exceeded"),
+		strings.Contains(low, "timeout"):
+		return "连接超时（检查网络或 VPN）"
+	case strings.Contains(low, "connection refused"), strings.Contains(low, "connection to the server"),
+		strings.Contains(low, "unable to connect to the server"), strings.Contains(low, "no such host"):
+		return "连不上服务器（检查 kubeconfig 里的地址、网络或 VPN）"
+	}
+	line = strings.TrimPrefix(line, "error: ")
+	if r := []rune(line); len(r) > 100 {
+		line = string(r[:100]) + "…"
+	}
+	return line
+}
+
+// kubeBadge 是卡片第三行和状态页头一句：连上了说 context 短名，连不上说清是哪个集群
+func kubeBadge(k *kubeStatus) (string, string) {
+	if k == nil {
+		return "读不出集群状态", "warn"
+	}
+	name := kubeShortName(k)
+	switch {
+	case k.Context == "":
+		return "○ 没有当前 context · 跑 kubectl config use-context", "missing"
+	case k.Reachable && name != "":
+		return "✓ 已连通 " + name, "ok"
+	case k.Reachable:
+		return "✓ 已连通集群", "ok"
+	case name != "":
+		return "! " + name + " 连不上", "warn"
+	default:
+		return "! 连不上集群", "warn"
+	}
+}
+
+// kubeShortName 把 EKS 那种长 ARN 压成集群名：取最后一段（cluster/Sought → Sought）
+func kubeShortName(k *kubeStatus) string {
+	name := k.Context
+	if i := strings.LastIndex(name, "/"); i >= 0 && i < len(name)-1 {
+		name = name[i+1:]
+	}
+	return name
+}
+
+// kubeInfo 是 kubectl 的头一条：当前 context、API server、服务端版本、连不连得上
+func kubeInfo(st toolState) (string, string, []infoField) {
+	if st.Kube == nil {
+		if st.Missing() && len(st.Foreign) == 0 {
+			return "○ 还没装 · 装好以后用 kubectl config use-context 选集群", "missing", nil
+		}
+		return "! 读不出集群状态", "warn", nil
+	}
+	k := st.Kube
+	headline, kind := kubeBadge(k)
+
+	var fields []infoField
+	if k.Context != "" {
+		fields = append(fields, infoField{Key: "当前 context", Value: k.Context})
+	} else {
+		fields = append(fields, infoField{Key: "当前 context", Value: "没有设置", Kind: "missing"})
+	}
+	if k.Cluster != "" && k.Cluster != k.Context {
+		fields = append(fields, infoField{Key: "集群", Value: k.Cluster})
+	}
+	if k.Server != "" {
+		fields = append(fields, infoField{Key: "API server", Value: k.Server})
+	}
+	if k.Reachable {
+		fields = append(fields, infoField{Key: "连通", Value: "✓ 能连上", Kind: "ok"})
+	} else {
+		fields = append(fields, infoField{Key: "连通", Value: "✗ 连不上", Kind: "warn"})
+	}
+	if k.ServerVersion != "" {
+		fields = append(fields, infoField{Key: "服务端版本", Value: k.ServerVersion})
+	}
+	if k.Note != "" {
+		fields = append(fields, infoField{Key: "说明", Value: k.Note, Kind: "warn"})
+	}
+	return headline, kind, fields
+}
+
+// statusInfo 按工具选读状态的那一套：glab 看登录，kubectl 看集群
+func statusInfo(st toolState) (string, string, []infoField) {
+	if st.Tool.StatusSource == "kubectl" {
+		return kubeInfo(st)
+	}
+	return loginInfo(st)
+}
+
 // ---------- 信息页的数据 ----------
 
 // infoField 是信息页上的一行：左边名字，右边值
@@ -242,7 +451,7 @@ func toolInfoFor(st toolState) toolInfo {
 	label, kind := st.Status()
 	info := toolInfo{Key: st.Tool.Key, Headline: label, Kind: kind, Fields: []infoField{}}
 	if st.Tool.Status {
-		if head, k, fields := loginInfo(st); head != "" {
+		if head, k, fields := statusInfo(st); head != "" {
 			info.Headline, info.Kind = head, k
 			info.Fields = append(info.Fields, fields...)
 		}

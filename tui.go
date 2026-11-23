@@ -27,6 +27,10 @@ var (
 	stylePath    = lipgloss.NewStyle().Foreground(pal.Dim)
 	styleRule    = lipgloss.NewStyle().Foreground(pal.Line)
 
+	// 进度条：填充用主色，底槽用卡片分隔线那种深色，整条看着是实的，不是一串点
+	styleBarFill  = lipgloss.NewStyle().Foreground(pal.Accent)
+	styleBarEmpty = lipgloss.NewStyle().Foreground(pal.Line)
+
 	// 选中的卡片用一条实心竖条，和未选中的细线一眼能分开
 	styleCardOn = lipgloss.NewStyle().
 			Border(lipgloss.Border{Left: "▌"}, false, false, false, true).
@@ -77,6 +81,11 @@ type tuiModel struct {
 	updCh       chan tea.Msg
 	updGen      int
 	batchAction string // “更新”或“预下载”
+
+	// 下载进度条的状态：progIndex/progTotal 是一键更新里第几个（单个工具为 0），
+	// progDone/progBytes 是当前文件已下载和总字节数，progBytes 为 0 表示长度未知
+	progIndex, progTotal int
+	progDone, progBytes  int64
 
 	chg  map[string]changelogState // 更新日志缓存：tool key -> 最近的几个版本
 	note notesView                 // 正在看的更新日志页
@@ -158,6 +167,13 @@ type installResult struct {
 type batchProgressMsg struct {
 	gen, index, total int
 	key               string
+}
+
+// progMsg 是下载中的字节进度。index/total 是一键更新里进行到第几个（单个工具是 0/0），
+// done/bytes 是当前这个文件下了多少、一共多大（对方没给长度时 bytes 为 0）
+type progMsg struct {
+	gen, index, total int
+	done, bytes       int64
 }
 
 type batchDoneMsg struct {
@@ -323,10 +339,24 @@ func skillCmd() tea.Cmd {
 	}
 }
 
-func installCmd(st toolState) tea.Cmd {
+// installCmd 装一个工具。下载的字节进度经 ch 回给 TUI——装一个工具也要有进度条，
+// 大文件要下十几秒，光转个圈看不出是在动还是卡住了
+func installCmd(st toolState, ch chan tea.Msg, gen int) tea.Cmd {
 	return func() tea.Msg {
-		v, err := installTool(st)
+		defer close(ch)
+		v, err := installTool(st, progressReporter(ch, gen, 0, 0))
 		return installDoneMsg{key: st.Tool.Key, from: st.Installed, version: v, err: err}
+	}
+}
+
+// progressReporter 把下载回调接成进度消息。通道满了就丢掉这一帧：
+// 下载在另一个 goroutine 里跑，不能因为界面还没来得及读就卡住下载
+func progressReporter(ch chan tea.Msg, gen, index, total int) progressFunc {
+	return func(done, bytes int64) {
+		select {
+		case ch <- progMsg{gen: gen, index: index, total: total, done: done, bytes: bytes}:
+		default:
+		}
 	}
 }
 
@@ -346,7 +376,7 @@ func upgradeAllCmd(targets []toolState, ch chan tea.Msg, gen int) tea.Cmd {
 			case ch <- batchProgressMsg{gen: gen, index: i + 1, total: len(targets), key: st.Tool.Key}:
 			default:
 			}
-			v, err := installTool(st)
+			v, err := installTool(st, progressReporter(ch, gen, i+1, len(targets)))
 			results = append(results, installResult{key: st.Tool.Key, from: st.Installed, to: v, err: err})
 		}
 		return batchDoneMsg{gen: gen, results: results}
@@ -363,7 +393,7 @@ func downloadAllCmd(targets []toolState, ch chan tea.Msg, gen int) tea.Cmd {
 			case ch <- batchProgressMsg{gen: gen, index: i + 1, total: len(targets), key: st.Tool.Key}:
 			default:
 			}
-			_, ver, err := fetchTool(st)
+			_, ver, err := fetchTool(st, progressReporter(ch, gen, i+1, len(targets)))
 			results = append(results, downloadResult{key: st.Tool.Key, ver: ver, err: err})
 		}
 		return downloadDoneMsg{gen: gen, results: results}
@@ -472,7 +502,20 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			action = "更新"
 		}
 		m.workText = fmt.Sprintf("正在%s %d/%d：%s…", action, msg.index, msg.total, msg.key)
+		// 换工具了，进度条从 0 重画
+		m.progIndex, m.progTotal = msg.index, msg.total
+		m.progDone, m.progBytes = 0, 0
 		// 继续等下一帧，否则后面的进度消息全堵在通道里
+		return m, waitUpd(m.updCh, msg.gen)
+
+	case progMsg:
+		if msg.gen != m.updGen || m.state != working {
+			return m, nil
+		}
+		if msg.index > 0 {
+			m.progIndex, m.progTotal = msg.index, msg.total
+		}
+		m.progDone, m.progBytes = msg.done, msg.bytes
 		return m, waitUpd(m.updCh, msg.gen)
 
 	case batchClosedMsg:
@@ -839,7 +882,23 @@ func (m tuiModel) startInstall(st toolState) (tea.Model, tea.Cmd) {
 	} else {
 		m.workText = "正在下载并替换 " + st.Tool.Key + "…"
 	}
-	return m, tea.Batch(m.spin.Tick, installCmd(st))
+	m.resetProgress()
+	ch, gen := m.newProgressCh()
+	return m, tea.Batch(m.spin.Tick, installCmd(st, ch, gen), waitUpd(ch, gen))
+}
+
+// newProgressCh 开一条新的进度通道。新开一条而不是复用旧的：
+// 上一次没读完的残留消息不带着旧的 gen 进来，界面上就不会突然跳一下
+func (m *tuiModel) newProgressCh() (chan tea.Msg, int) {
+	m.updGen++
+	m.updCh = make(chan tea.Msg, 16)
+	return m.updCh, m.updGen
+}
+
+// resetProgress 清掉上一个操作的进度，换工具时进度条从 0 开始画
+func (m *tuiModel) resetProgress() {
+	m.progIndex, m.progTotal = 0, 0
+	m.progDone, m.progBytes = 0, 0
 }
 
 // upgradeOne 是 u 键。hmck 只查看 PATH 上已有的那份的工具（brew 的 glab），
@@ -877,11 +936,10 @@ func (m tuiModel) startUpgradeAll() (tea.Model, tea.Cmd) {
 	}
 
 	m.state = working
-	m.updGen++
-	m.updCh = make(chan tea.Msg, 16)
+	m.resetProgress()
 	m.batchAction = "更新"
 	m.workText = fmt.Sprintf("正在更新 %d 个工具…", len(targets))
-	ch, gen := m.updCh, m.updGen
+	ch, gen := m.newProgressCh()
 	return m, tea.Batch(m.spin.Tick, upgradeAllCmd(targets, ch, gen), waitUpd(ch, gen))
 }
 
@@ -913,11 +971,10 @@ func (m tuiModel) startAutoDownload() (tea.Model, tea.Cmd) {
 	}
 
 	m.state = working
-	m.updGen++
-	m.updCh = make(chan tea.Msg, 16)
+	m.resetProgress()
 	m.batchAction = "预下载"
 	m.workText = fmt.Sprintf("正在下载 %d 个工具的新版…", len(targets))
-	ch, gen := m.updCh, m.updGen
+	ch, gen := m.newProgressCh()
 	return m, tea.Batch(m.spin.Tick, downloadAllCmd(targets, ch, gen), waitUpd(ch, gen))
 }
 
@@ -1323,16 +1380,17 @@ func (m tuiModel) renderCard(st toolState, selected bool, cols cardCols) string 
 	}
 
 	lines := []string{head, line2, line3}
+	// 招牌比文字行高：文字在招牌中间那几行，上下各留一点，看着不像是贴顶了
+	top := max((len(logo)-len(lines))/2, 0)
 	var b strings.Builder
 	for i, l := range logo {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		// 招牌比文字行多的时候，多出来的那几行只放招牌
 		b.WriteString(l)
-		if i < len(lines) {
+		if j := i - top; j >= 0 && j < len(lines) {
 			b.WriteString("  ")
-			b.WriteString(lines[i])
+			b.WriteString(lines[j])
 		}
 	}
 
@@ -1351,8 +1409,52 @@ func (m tuiModel) installHint() string {
 }
 
 func (m tuiModel) viewWorking() string {
-	return styles.Title.Render("hmck") + styles.Dim.Render("  处理中") + "\n\n" +
+	out := styles.Title.Render("hmck") + styles.Dim.Render("  处理中") + "\n\n" +
 		"  " + m.spin.View() + "  " + styles.Dim.Render(m.workText)
+	if bar := m.progressBar(); bar != "" {
+		out += "\n" + bar
+	}
+	return out
+}
+
+// progressBar 画下载进度：只装一个工具时就是它自己下到哪了，
+// 一键更新时把「第几个」和「这个下到哪」合成一条总进度，还没开始的算 0。
+// 下载真正占时间，下载前（查版本）和解压后（替换文件）都没有比例可算，不画条
+func (m tuiModel) progressBar() string {
+	if m.progBytes <= 0 && m.progDone <= 0 {
+		return ""
+	}
+	// 对方没给 Content-Length、也不是一键更新：画不出比例，只报已下载多少
+	if m.progBytes <= 0 && m.progTotal == 0 {
+		return "     " + styles.Dim.Render("已下载 "+humanSize(m.progDone))
+	}
+
+	inner := 0.0
+	if m.progBytes > 0 {
+		inner = float64(m.progDone) / float64(m.progBytes)
+		inner = min(inner, 1)
+	}
+	frac := inner
+	if m.progTotal > 1 {
+		frac = (float64(m.progIndex-1) + inner) / float64(m.progTotal)
+	}
+
+	width := 24
+	if m.width > 0 {
+		width = clampInt(m.width-38, 12, 30)
+	}
+	filled := int(frac*float64(width) + 0.5)
+	bar := styleBarFill.Render(strings.Repeat(barFill, filled)) +
+		styleBarEmpty.Render(strings.Repeat(barEmpty, width-filled))
+
+	// 对齐到上面那行字：两个空格缩进 + 转圈的一个字符 + 两个空格
+	out := "     " + bar + "  " + styles.Dim.Render(fmt.Sprintf("%3d%%", int(frac*100+0.5)))
+	if m.progBytes > 0 {
+		out += "  " + styles.Dim.Render(humanSize(m.progDone)+" / "+humanSize(m.progBytes))
+	} else {
+		out += "  " + styles.Dim.Render("已下载 "+humanSize(m.progDone))
+	}
+	return out
 }
 
 func (m tuiModel) viewResult() string {

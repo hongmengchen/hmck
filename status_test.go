@@ -152,3 +152,129 @@ func fieldsText(fields []infoField) string {
 	}
 	return b.String()
 }
+
+// kubeConfigMinified 是 `kubectl config view --minify -o json` 的样子（值都是假的）
+const kubeConfigMinified = `{
+  "kind": "Config",
+  "apiVersion": "v1",
+  "current-context": "arn:aws-cn:eks:cn-northwest-1:123456789012:cluster/Sought",
+  "clusters": [{
+    "name": "arn:aws-cn:eks:cn-northwest-1:123456789012:cluster/Sought",
+    "cluster": {
+      "server": "https://ABC123.gr7.cn-northwest-1.eks.amazonaws.com.cn",
+      "certificate-authority-data": "Y2VydA=="
+    }
+  }],
+  "contexts": [{
+    "name": "arn:aws-cn:eks:cn-northwest-1:123456789012:cluster/Sought",
+    "context": {"cluster": "arn:aws-cn:eks:cn-northwest-1:123456789012:cluster/Sought", "user": "ops"}
+  }],
+  "users": [{"name": "ops", "user": {"token": "should-not-be-read"}}]
+}`
+
+const kubeVersionConnected = `{
+  "clientVersion": {"gitVersion": "v1.37.2"},
+  "kustomizeVersion": "v5.8.1",
+  "serverVersion": {"gitVersion": "v1.34.12-eks-91f89a9"}
+}`
+
+const kubeVersionNoServer = `{
+  "clientVersion": {"gitVersion": "v1.37.2"},
+  "kustomizeVersion": "v5.8.1"
+}`
+
+func TestParseKubeConfig(t *testing.T) {
+	ctx, cluster, server, ok := parseKubeConfig(kubeConfigMinified)
+	if !ok {
+		t.Fatal("应当解析成功")
+	}
+	if ctx != "arn:aws-cn:eks:cn-northwest-1:123456789012:cluster/Sought" {
+		t.Errorf("context = %q", ctx)
+	}
+	if cluster != ctx {
+		t.Errorf("集群 = %q", cluster)
+	}
+	if server != "https://ABC123.gr7.cn-northwest-1.eks.amazonaws.com.cn" {
+		t.Errorf("server = %q", server)
+	}
+	if _, _, _, ok := parseKubeConfig("error: current-context must exist"); ok {
+		t.Error("报错文字不该当成 kubeconfig")
+	}
+}
+
+func TestParseKubeServerVersion(t *testing.T) {
+	if got := parseKubeServerVersion(kubeVersionConnected); got != "v1.34.12-eks-91f89a9" {
+		t.Errorf("服务端版本 = %q", got)
+	}
+	// 连不上时只有 clientVersion：不能把客户端版本当成集群连上了
+	if got := parseKubeServerVersion(kubeVersionNoServer); got != "" {
+		t.Errorf("没有 serverVersion 时应当返回空，得到 %q", got)
+	}
+}
+
+func TestKubeConnectNote(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"error: You must be logged in to the server (the server has asked for the client to provide credentials)", "认证没通过"},
+		{"error: current-context must exist in order to minify", "没有设置当前 context"},
+		{"Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout", "连接超时"},
+		{"The connection to the server localhost:8080 was refused - did you specify the right host or port?", "连不上服务器"},
+		{"W1123 10:21:32.123456   12345 loader.go:223] Config not found: /tmp/none\nerror: no such host", "连不上服务器"},
+	}
+	for _, c := range cases {
+		if got := kubeConnectNote(c.in); !strings.Contains(got, c.want) {
+			t.Errorf("kubeConnectNote(%q) = %q，想看到 %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestKubeBadge(t *testing.T) {
+	connected := &kubeStatus{
+		Context:       "arn:aws-cn:eks:cn-northwest-1:123456789012:cluster/Sought",
+		ServerVersion: "v1.34.12-eks-91f89a9",
+		Reachable:     true,
+	}
+	if head, kind := kubeBadge(connected); head != "✓ 已连通 Sought" || kind != "ok" {
+		t.Errorf("headline = %q, kind = %q", head, kind)
+	}
+
+	connected.Reachable = false
+	if head, kind := kubeBadge(connected); head != "! Sought 连不上" || kind != "warn" {
+		t.Errorf("headline = %q, kind = %q", head, kind)
+	}
+
+	if head, kind := kubeBadge(&kubeStatus{}); kind != "missing" || !strings.Contains(head, "没有当前 context") {
+		t.Errorf("headline = %q, kind = %q", head, kind)
+	}
+	if head, kind := kubeBadge(nil); kind != "warn" || !strings.Contains(head, "读不出") {
+		t.Errorf("headline = %q, kind = %q", head, kind)
+	}
+}
+
+// kubectl 的状态页：当前 context、API server、服务端版本都要露出来，
+// 但 kubeconfig 里的 token 一个字都不能带出来
+func TestKubeInfo(t *testing.T) {
+	ctx, cluster, server, _ := parseKubeConfig(kubeConfigMinified)
+	st := toolState{
+		Tool:      tool{Key: "kubectl", Repo: "kubernetes/kubernetes", Status: true, StatusSource: "kubectl"},
+		Path:      "/home/alice/.local/bin/kubectl",
+		Installed: "1.37.2",
+		Latest:    "1.37.2",
+		Kube: &kubeStatus{
+			Context: ctx, Cluster: cluster, Server: server,
+			ServerVersion: parseKubeServerVersion(kubeVersionConnected), Reachable: true,
+		},
+	}
+	info := toolInfoFor(st)
+	if info.Kind != "ok" || !strings.Contains(info.Headline, "已连通 Sought") {
+		t.Errorf("headline = %q, kind = %q", info.Headline, info.Kind)
+	}
+	joined := fieldsText(info.Fields)
+	for _, want := range []string{ctx, server, "v1.34.12-eks-91f89a9", "✓ 能连上"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("缺 %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "should-not-be-read") || strings.Contains(joined, "token") {
+		t.Errorf("信息里不该出现 token: %s", joined)
+	}
+}

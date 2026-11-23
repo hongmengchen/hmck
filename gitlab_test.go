@@ -177,7 +177,7 @@ func TestFetchToolFromTarGz(t *testing.T) {
 	tl.Platforms = []string{runtime.GOOS + "/" + runtime.GOARCH}
 
 	st := toolState{Tool: tl, Latest: "9.9.7"}
-	got, ver, err := fetchTool(st)
+	got, ver, err := fetchTool(st, nil)
 	if err != nil {
 		t.Fatalf("fetchTool: %v", err)
 	}

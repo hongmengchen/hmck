@@ -45,6 +45,15 @@ var (
 	gitlabReleasesAPIURL = func(repo string) string {
 		return "https://gitlab.com/api/v4/projects/" + url.PathEscape(repo) + "/releases?per_page=1"
 	}
+
+	// kubectl 走 dl.k8s.io：最新版是一行 stable.txt，资产按 平台/架构 分目录，
+	// 校验值是资产旁边同名的 .sha256（里面只有一行哈希）
+	kubernetesStableURL = func() string {
+		return "https://dl.k8s.io/release/stable.txt"
+	}
+	kubernetesAssetURL = func(tag, goos, goarch, asset string) string {
+		return fmt.Sprintf("https://dl.k8s.io/release/%s/bin/%s/%s/%s", tag, goos, goarch, asset)
+	}
 )
 
 var (
@@ -54,6 +63,9 @@ var (
 
 // latestTag 先看 releases/latest 的跳转（不吃 API 限流），失败再问 API
 func latestTag(t tool) (string, error) {
+	if t.releaseHost() == "kubernetes" {
+		return kubernetesLatestTag()
+	}
 	if t.releaseHost() == "gitlab" {
 		if tag, err := gitlabLatestTagViaRedirect(t.Repo); err == nil {
 			return tag, nil
@@ -174,10 +186,39 @@ func gitlabLatestTagViaAPI(repo string) (string, error) {
 	return rels[0].TagName, nil
 }
 
+// kubernetesLatestTag 读 dl.k8s.io/release/stable.txt：一把 vX.Y.Z，指当前稳定版
+func kubernetesLatestTag() (string, error) {
+	req, err := http.NewRequest(http.MethodGet, kubernetesStableURL(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "hmck/"+version)
+	resp, err := apiClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("读 stable.txt 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("dl.k8s.io 返回 %s", resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+	if err != nil {
+		return "", err
+	}
+	tag := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(tag, "v") || strings.ContainsAny(tag, " \t\n/") {
+		return "", fmt.Errorf("stable.txt 里不是版本号: %q", tag)
+	}
+	return tag, nil
+}
+
 // releaseAssetURLFor 按工具的发布平台拼资产地址
 func releaseAssetURLFor(t tool, tag, asset string) string {
-	if t.releaseHost() == "gitlab" {
+	switch t.releaseHost() {
+	case "gitlab":
 		return gitlabAssetURL(t.Repo, tag, asset)
+	case "kubernetes":
+		return kubernetesAssetURL(tag, runtime.GOOS, runtime.GOARCH, asset)
 	}
 	return releaseAssetURL(t.Repo, tag, asset)
 }
@@ -254,9 +295,37 @@ func cachedBinary(t tool, ver string) (string, error) {
 	return filepath.Join(dir, name), nil
 }
 
+// progressFunc 报告一次下载的进度：已经下了多少字节、一共多少。
+// 对方没给 Content-Length 时 total 为 0，调用方只能说「已下载多少」。
+// 从下载函数里同步调用，可能被调得很频繁，实现要能随手丢弃多余的帧。
+type progressFunc func(done, total int64)
+
+// progressWriter 包住落盘的目标文件，边写边报进度。
+// 一次 20MB 的下载有几百次 Write，调用方要画界面，按 100ms 节流，
+// 不然消息比帧还多，TUI 来不及画
+type progressWriter struct {
+	w     io.Writer
+	on    progressFunc
+	done  int64
+	total int64
+	last  time.Time
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	p.done += int64(n)
+	if p.on != nil {
+		if now := time.Now(); p.last.IsZero() || now.Sub(p.last) >= 100*time.Millisecond || err != nil {
+			p.last = now
+			p.on(p.done, p.total)
+		}
+	}
+	return n, err
+}
+
 // fetchTool 下载并校验到一个版本对应的缓存文件；已经下过就直接复用。
-// 返回缓存路径和版本号。
-func fetchTool(st toolState) (string, string, error) {
+// 返回缓存路径和版本号。on 收下载进度，可以是 nil。
+func fetchTool(st toolState, on progressFunc) (string, string, error) {
 	t := st.Tool
 	if !supports(t, runtime.GOOS, runtime.GOARCH) {
 		return "", "", fmt.Errorf("%s 没有 %s/%s 的发布", t.Key, runtime.GOOS, runtime.GOARCH)
@@ -287,7 +356,7 @@ func fetchTool(st toolState) (string, string, error) {
 		return "", "", err
 	}
 	asset := assetName(t, runtime.GOOS, runtime.GOARCH, ver)
-	tmp, err := downloadAsset(releaseAssetURLFor(t, tag, asset), dir)
+	tmp, err := downloadAsset(releaseAssetURLFor(t, tag, asset), dir, on)
 	if err != nil {
 		return "", "", err
 	}
@@ -314,8 +383,8 @@ func fetchTool(st toolState) (string, string, error) {
 	return cached, ver, nil
 }
 
-// installTool 下载并替换成最新版；返回装好的版本号
-func installTool(st toolState) (string, error) {
+// installTool 下载并替换成最新版；返回装好的版本号。on 收下载进度，可以是 nil
+func installTool(st toolState, on progressFunc) (string, error) {
 	t := st.Tool
 	target := st.Path
 	if target == "" {
@@ -338,7 +407,7 @@ func installTool(st toolState) (string, error) {
 		return "", fmt.Errorf("%s 不可写（程序在运行？或用 sudo 重试）", dir)
 	}
 
-	cached, ver, err := fetchTool(st)
+	cached, ver, err := fetchTool(st, on)
 	if err != nil {
 		return "", err
 	}
@@ -380,7 +449,7 @@ func copyToTemp(src, dir string) (string, error) {
 	return name, nil
 }
 
-func downloadAsset(assetURL, dir string) (string, error) {
+func downloadAsset(assetURL, dir string, on progressFunc) (string, error) {
 	resp, err := downloadClient.Get(assetURL)
 	if err != nil {
 		return "", fmt.Errorf("下载失败: %w", err)
@@ -390,12 +459,22 @@ func downloadAsset(assetURL, dir string) (string, error) {
 		return "", fmt.Errorf("下载失败: %s（%s）", resp.Status, assetURL)
 	}
 
+	// 头一到就知道大小，先报一帧 0%，进度条能立刻把总长画出来
+	total := resp.ContentLength
+	if total < 0 {
+		total = 0
+	}
+	if on != nil {
+		on(0, total)
+	}
+
 	tmp, err := os.CreateTemp(dir, ".hmck-dl-*")
 	if err != nil {
 		return "", err
 	}
 	name := tmp.Name()
-	n, err := io.Copy(tmp, resp.Body)
+	pw := &progressWriter{w: tmp, on: on, total: total}
+	n, err := io.Copy(pw, resp.Body)
 	closeErr := tmp.Close()
 	if err != nil || closeErr != nil {
 		os.Remove(name)
@@ -408,32 +487,57 @@ func downloadAsset(assetURL, dir string) (string, error) {
 		os.Remove(name)
 		return "", fmt.Errorf("只下载到 %d 字节，可能不是二进制", n)
 	}
+	if on != nil {
+		on(n, total) // 收尾一帧，进度条画到满
+	}
 	return name, nil
 }
 
 func verifyChecksum(t tool, tag, asset, file string) error {
-	resp, err := downloadClient.Get(releaseAssetURLFor(t, tag, "checksums.txt"))
-	if err != nil {
-		return fmt.Errorf("下载 checksums.txt 失败: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载 checksums.txt 失败: %s", resp.Status)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return err
-	}
-	want := ""
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && strings.TrimPrefix(fields[len(fields)-1], "*") == asset {
-			want = strings.ToLower(fields[0])
-			break
+	var want string
+	if t.releaseHost() == "kubernetes" {
+		// kubectl 没有 checksums.txt：每个资产旁边一个 .sha256，里面只有一行哈希
+		resp, err := downloadClient.Get(releaseAssetURLFor(t, tag, asset) + ".sha256")
+		if err != nil {
+			return fmt.Errorf("下载 %s.sha256 失败: %w", asset, err)
 		}
-	}
-	if want == "" {
-		return fmt.Errorf("checksums.txt 里没有 %s", asset)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("下载 %s.sha256 失败: %s", asset, resp.Status)
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+		if err != nil {
+			return err
+		}
+		if fields := strings.Fields(string(data)); len(fields) > 0 {
+			want = strings.ToLower(fields[0])
+		}
+		if want == "" {
+			return fmt.Errorf("%s.sha256 里没有哈希", asset)
+		}
+	} else {
+		resp, err := downloadClient.Get(releaseAssetURLFor(t, tag, "checksums.txt"))
+		if err != nil {
+			return fmt.Errorf("下载 checksums.txt 失败: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("下载 checksums.txt 失败: %s", resp.Status)
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && strings.TrimPrefix(fields[len(fields)-1], "*") == asset {
+				want = strings.ToLower(fields[0])
+				break
+			}
+		}
+		if want == "" {
+			return fmt.Errorf("checksums.txt 里没有 %s", asset)
+		}
 	}
 
 	f, err := os.Open(file)

@@ -1,13 +1,13 @@
 ---
 name: hmck
-description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、glab 及以后新增的，也包括 hmck 自己），看已装/最新版本和登录状态、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab」「glab 登没登录」「卸载某个工具 / 卸载 hmck」「自动更新」「新增一个工具让 hmck 管理」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
+description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、glab、kubectl 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态和集群连通性、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「卸载某个工具 / 卸载 hmck」「自动更新」「新增一个工具让 hmck 管理」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
 ---
 
 # hmck
 
-`hmck` 是这台机器上的工具管理器：内置 kube-token、npm-token、glab 以及它自己，也能把以后的新工具加进来。
+`hmck` 是这台机器上的工具管理器：内置 kube-token、npm-token、glab、kubectl 以及它自己，也能把以后的新工具加进来。
 它知道每个工具的已安装版本、最新版本、安装路径，能安装、升级、直接启动、卸载，
-还会顺手把各工具的 agent skill 刷新到全局目录；对 glab 这类工具，它还能读出登录状态。
+还会顺手把各工具的 agent skill 刷新到全局目录；对 glab 这类工具能读出登录状态，对 kubectl 能读出当前 context 和集群连通性。
 
 **agent 一律走 CLI，不要启动 TUI。** `hmck`（无参数）会进全屏 TUI，需要真终端；
 CLI 的每个动作都有对应命令，输出也可以 `--json`。
@@ -15,7 +15,8 @@ CLI 的每个动作都有对应命令，输出也可以 `--json`。
 ## 铁律
 
 1. **不要回显任何 token。** hmck 本身不碰密钥，但它管理的工具会；调用它们时输出里只会有掩码。
-   `hmck info glab` 只跑 `glab auth status`，输出里也只有主机、账号、凭证来源，不会打印 token。
+   `hmck info glab` 只跑 `glab auth status`，输出里也只有主机、账号、凭证来源，不会打印 token；
+   `hmck info kubectl` 只跑 `kubectl config view --minify` 和 `kubectl version -o json`，不读 kubeconfig 里的证书和 token。
 2. **不要擅自改用户的真实配置。** `~/.npmrc`、`~/.kube/config` 的写入交给 kube-token /
    npm-token 自己做（它们会自动备份、复验、必要时还原），agent 不要手改文件。
 3. **升级和卸载只走 hmck。** 不要用 `go install`、手动下载二进制或改 PATH 来「修好」某个工具，
@@ -30,14 +31,17 @@ CLI 的每个动作都有对应命令，输出也可以 `--json`。
 hmck list              # 纯文本表格：NAME / 已安装 / 最新 / 状态
 hmck list --json       # 给脚本/agent 解析
 hmck info glab         # 一个工具的详情，包括 glab 的登录状态（--json 给脚本）
+hmck info kubectl      # 当前 context、API server、服务端版本、连不连得上
 hmck version
 ```
 
 `hmck info <tool>` 是「这个工具现在怎么样」：先一行总结（`✓ 已登录 alice@git.example.com`、
-`○ 还没登录`、`✓ 已是最新`、`可升级 1.2.3`），再列字段。glab 这类能读登录状态的工具，
+`✓ 已连通 eks-prod`、`○ 还没登录`、`✓ 已是最新`、`可升级 1.2.3`），再列字段。glab 这类能读登录状态的工具，
 字段是：主机、账号、凭证来源（系统钥匙串 / 配置文件 / 环境变量）、传输（`git ssh · API https`）、
-REST API、GraphQL、其他登录过的主机；之后每个工具都有版本、最新、位置、更新时间、
-PATH 上的其他副本和仓库。只跑 `glab auth status`，不会读 token 本身。
+REST API、GraphQL、其他登录过的主机；kubectl 的字段是：当前 context、集群、API server、
+服务端版本、连通性，连不上时还有一句说明（token 过期 / 超时 / 地址不通）；
+之后每个工具都有版本、最新、位置、更新时间、PATH 上的其他副本和仓库。
+hmck 只跑 `glab auth status`、`kubectl config view --minify`、`kubectl version -o json`，不会读 token、证书本身。
 
 `list --json` 每条形如：
 
@@ -56,8 +60,9 @@ PATH 上的其他副本和仓库。只跑 `glab auth status`，不会读 token �
 
 `installed` 为空表示没装；`latest` 为空表示没查到（`error` 里写原因，常见是网络或 API 限流）。
 `updated_at` 是上一次版本更新时间：hmck 装/升级成功时记进 `state.json`；不是 hmck 装的，用二进制文件的修改时间。
-版本检测：已装版本读 `<tool> version`；最新版看 GitHub `releases/latest` 的跳转（GitLab 工具看
-`releases/permalink/latest`），失败再退回 API。
+版本检测：已装版本读 `<tool> version`（kubectl 用 `version --client`，不连集群）；最新版看 GitHub `releases/latest` 的跳转（GitLab 工具看
+`releases/permalink/latest`），失败再退回 API。kubectl 走 `dl.k8s.io`：最新版读 `stable.txt`，资产按平台分目录下载，
+校验的是资产旁边同名的 `.sha256`。
 
 ## 2. 安装 / 升级 / 启动
 
@@ -86,14 +91,16 @@ TUI（只有用户自己在终端里用）：`↑↓` 选择，`enter` 启动（
 卡片上版本号前的图标就是状态：`✓` 已是最新、`↑` 可更新（`旧 → 新`）、`↓` 已下载待安装、
 `○` 未安装、`!` 查不到最新版或没有对应平台的发布。第一行右边是上次版本更新时间。
 每张卡片左边是该工具自己的招牌：`docs/logos/*.svg`（glab 是 GitLab 官方 press kit 的狸猫）
-编进程序，运行时画成 16×16 点阵、折成盲文字符，颜色取 SVG 原色；自定义工具没有 SVG，
-退回方框加首字母。招牌右边三行依次是名称和版本、作用 / 装在哪、仓库 / 登录状态 / 最近一版
+编进程序，运行时光栅成 24×12 像素、折成 12 列 × 6 行的象限字符（`▘▀▖▌█` 这类实心方块），
+颜色取 SVG 原色；造型是照终端网格手摆的像素画（画布 24 单位宽、24 单位高，一格像素
+1 单位宽 2 单位高），不是缩小的普通矢量图。自定义工具没有 SVG，退回方框加首字母。招牌右边三行依次是名称和版本、作用 / 装在哪、仓库 / 登录状态 / 最近一版
 的第一条说明（启动时抓 `CHANGELOG.md`，失败就只显示仓库名）。
 
-glab 在 brew / apt 装的人多，hmck 只认自己目录里的那一份（`OwnDir`）：PATH 上别人装的副本
-不接管、不删，卡片上注明「PATH 上已有一份」并显示那份的版本号，`enter` 就是启动那一份。
+glab 在 brew / apt 装的人多、kubectl 常跟着 Docker Desktop 来，hmck 只认自己目录里的那一份（`OwnDir`）：
+PATH 上别人装的副本不接管、不删，卡片上注明「PATH 上已有一份」并显示那份的版本号，`enter` 就是启动那一份。
 hmck 自己那份优先（在 PATH 前面），没有也不另装——两个 glab 并存会把人和 agent 一直在用的
 那份顶掉。这种工具按 `u` 只说明它归谁管、该用谁升级。装不装、卸不卸都看用户的意思。
+状态照样读：glab 看登录，kubectl 看集群连通性。
 
 ## 卸载
 

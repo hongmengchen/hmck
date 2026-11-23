@@ -2,6 +2,24 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.10.3] - 2026-11-19
+
+### 新增
+
+- 升级、安装、下载时有了进度条：TUI 的「处理中」界面在转圈下面画一条实心方块进度条，带百分比和「已下载 / 总大小」。一键更新时整条按「第几个工具 + 当前这个文件下到哪」合起来算，不会每个工具都从 0 重来
+- `hmck install` / `hmck upgrade` 在真终端里也在「下载中…」那行原地刷新进度，下完把那一行擦掉，结果照常从行首接着写。stdout 不是终端时（脚本、agent）还是什么都不画
+- 对方没给 Content-Length 时画不出比例，只报「已下载 X MB」
+- 新增 kubectl：最新版读 `dl.k8s.io/release/stable.txt`，资产按 平台/架构 下载、用旁边同名的 `.sha256` 校验；卡片第三行标出当前 context 和连不连得上，`i` 信息页给出 context、集群、API server、服务端版本
+- `hmck info kubectl` 连不上时会说清是 token 过期（提示用 `kube-token` 换新）、超时还是地址不通；只跑 `kubectl config view --minify` 和 `kubectl version -o json`，不读 kubeconfig 里的证书和 token
+- kubectl 的已装版本用 `kubectl version --client` 问，不碰集群；只有状态检查才连（`--request-timeout=4s`，超时就停）
+
+### 变更
+
+- 招牌重画：不再把普通矢量图缩小后靠阈值切，而是照终端网格手摆像素画（24×12 个像素，一格像素半字符宽、一字符高），缩小和阈值带来的毛边、糊块没有了。hmck 是绿色 `>` 加一条下划线（就是名字里那个横），kube-token 是蓝色六边形框里一颗核心，npm-token 换成红挂锁；glab 还是官方狸猫
+- 招牌改用象限字符（`▘▀▖▌▛█` 这类实心方块）折成 12 列 × 6 行，替代原来的盲文点阵：点阵的点和点之间是断开的，边缘永远像一串珠子，斜边也没法收干净；实心方块能原样画出每个像素，斜边收成一级级台阶，看着更像图标
+- 卡片右边的三行文字在 6 行高的招牌里垂直居中，不再贴着顶边
+- kubectl 跟 glab 一样只认 hmck 目录里的那一份（`OwnDir`）：Docker Desktop 自带的那份只列出来、不接管
+
 ## [0.10.2] - 2026-11-19
 
 ### 变更

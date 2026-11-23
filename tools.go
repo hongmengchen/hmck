@@ -28,11 +28,13 @@ type tool struct {
 	Checksums   bool     `json:"checksums,omitempty"`    // 发布里有没有 checksums.txt
 	Skill       bool     `json:"skill,omitempty"`        // 支不支持 `<tool> skill --quiet`
 	PostInstall []string `json:"post_install,omitempty"` // 装完/升级后要跑的子命令（忽略失败）
+	VersionArgs []string `json:"version_args,omitempty"` // 问版本号的子命令，默认 version；kubectl 用 version --client
 
-	OwnDir bool `json:"-"` // 只管理 hmck 目录里的那一份，不接管 PATH 上别人装的副本（如 glab）
-	Status bool `json:"-"` // hmck 能读出它的登录状态（如 glab auth status）
-	Custom bool `json:"-"` // 来自本机配置，不是内置
-	Self   bool `json:"-"` // hmck 自己：路径取当前可执行文件，版本用内置的
+	OwnDir       bool   `json:"-"` // 只管理 hmck 目录里的那一份，不接管 PATH 上别人装的副本（如 glab、kubectl）
+	Status       bool   `json:"-"` // hmck 能读出它自己的状态（登录 / 集群）
+	StatusSource string `json:"-"` // 状态怎么读：glab（默认，看登录）/ kubectl（看集群）
+	Custom       bool   `json:"-"` // 来自本机配置，不是内置
+	Self         bool   `json:"-"` // hmck 自己：路径取当前可执行文件，版本用内置的
 }
 
 var registry = []tool{
@@ -88,6 +90,29 @@ var registry = []tool{
 		Status:    true,
 	},
 	{
+		// kubectl 不在 GitHub / GitLab 发版：最新版读 dl.k8s.io 的 stable.txt，
+		// 资产是每个平台一个裸二进制，旁边配一个同名的 .sha256。
+		// Docker Desktop 常自带一份：跟 glab 一样只认 hmck 目录里的那份。
+		// 版本号问 `kubectl version --client`，不连集群；状态页才去连。
+		Key:    "kubectl",
+		Name:   "kubectl",
+		Desc:   "Kubernetes 命令行：Pod、日志、集群都在终端里",
+		Host:   "kubernetes",
+		Repo:   "kubernetes/kubernetes",
+		Binary: "kubectl",
+		Asset:  "kubectl{ext}",
+		Platforms: []string{
+			"darwin/amd64", "darwin/arm64",
+			"linux/amd64", "linux/arm64",
+			"windows/amd64", "windows/arm64",
+		},
+		Checksums:    true,
+		OwnDir:       true,
+		Status:       true,
+		StatusSource: "kubectl",
+		VersionArgs:  []string{"version", "--client"},
+	},
+	{
 		// hmck 自己也在 GitHub 发版，升级时和别的工具走同一套下载/校验/替换
 		Key:    "hmck",
 		Name:   "hmck",
@@ -112,6 +137,7 @@ var toolMarks = map[string][]string{
 	"kube-token": {"╱───╲", "│ K │", "╲───╱"},
 	"npm-token":  {"┌───┐", "│ N │", "└───┘"},
 	"glab":       {"╱╲_╱╲", "│ G │", "╲___╱"},
+	"kubectl":    {"═╤═╤═", "─( )─", "═╧═╧═"},
 }
 
 // allTools 是内置 + 本机配置里的自定义工具；key 冲突时内置优先
@@ -147,10 +173,13 @@ func toolByKey(key string) (tool, bool) {
 	return tool{}, false
 }
 
-// releaseHost 返回发布平台；现在支持 GitHub（默认）和 GitLab
+// releaseHost 返回发布平台；现在支持 GitHub（默认）、GitLab 和 dl.k8s.io
 func (t tool) releaseHost() string {
-	if strings.EqualFold(t.Host, "gitlab") {
+	switch strings.ToLower(t.Host) {
+	case "gitlab":
 		return "gitlab"
+	case "kubernetes", "k8s":
+		return "kubernetes"
 	}
 	return "github"
 }
@@ -395,11 +424,17 @@ func parseVersionOutput(out string) string {
 	return strings.TrimPrefix(fields[len(fields)-1], "v")
 }
 
-// installedVersion 跑 `<tool> version` 取版本号；失败返回空
-func installedVersion(path string) string {
+// installedVersion 跑 `<tool> version` 取版本号；失败返回空。
+// 有的工具问版本要带参数（kubectl 用 `version --client`，不碰集群），
+// 参数写在工具的 VersionArgs 里
+func installedVersion(t tool, path string) string {
+	args := t.VersionArgs
+	if len(args) == 0 {
+		args = []string{"version"}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "version")
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append(os.Environ(), "HMCK_NO_MIGRATE=1") // 只问版本，别让子进程顺手搬家
 	out, err := cmd.Output()
 	if err != nil {
@@ -419,9 +454,10 @@ type toolState struct {
 	Foreign    []string // PATH 上其他位置的同名程序，hmck 不管它们
 	ForeignVer string   // PATH 上那份的版本号；hmck 没接管它，但说清楚它是什么版本
 
-	Login     string      // 登录状态的一句话（如「已登录 alice@git.example.com」）；空 = 不知道或不支持
+	Login     string      // 状态的一句话（如「已登录 alice@git.example.com」「✓ 已连通 eks-prod」）；空 = 不知道或不支持
 	LoginKind string      // ok / warn / missing，决定这句话怎么染色
 	Logins    []glabLogin // 读到的各家主机登录情况（glab 这类工具才有）
+	Kube      *kubeStatus // 当前 context / API server / 连不连得上（kubectl 才有）
 }
 
 func (s toolState) Missing() bool { return s.Path == "" || s.Installed == "" }
@@ -463,26 +499,36 @@ func inspectLocal(t tool) toolState {
 		st.UpdatedAt = updatedAtFor(t.Key, st.Installed, st.Path)
 	} else if p, ok := findTool(t); ok {
 		st.Path = p
-		st.Installed = installedVersion(p)
+		st.Installed = installedVersion(t, p)
 		st.UpdatedAt = updatedAtFor(t.Key, st.Installed, p)
 	}
 	if !t.Self {
 		st.Foreign = foreignCopies(t, st.Path)
-		// 只装了别人的那份时（brew 的 glab），问一下它的版本，界面上好说清楚
+		// 只装了别人的那份时（brew 的 glab、Docker Desktop 的 kubectl），
+		// 问一下它的版本，界面上好说清楚
 		if st.Installed == "" && len(st.Foreign) > 0 {
-			st.ForeignVer = installedVersion(st.Foreign[0])
+			st.ForeignVer = installedVersion(t, st.Foreign[0])
 		}
 	}
 	if t.Status {
-		// 登录状态问的是 glab 自己：hmck 目录里的优先，没有就用 PATH 上那份
+		// 状态问的是工具自己：hmck 目录里的优先，没有就用 PATH 上那份
 		if bin := toolCopy(st); bin != "" {
-			logins, err := glabAuthLogins(bin)
-			switch {
-			case err != nil:
-				st.Login, st.LoginKind = "读不出登录状态", "warn"
-			default:
-				st.Logins = logins
-				st.Login, st.LoginKind = loginBadgeOf(logins)
+			if t.StatusSource == "kubectl" {
+				st.Kube = readKubeStatus(bin)
+				if st.Kube == nil {
+					st.Login, st.LoginKind = "读不出集群状态", "warn"
+				} else {
+					st.Login, st.LoginKind = kubeBadge(st.Kube)
+				}
+			} else {
+				logins, err := glabAuthLogins(bin)
+				switch {
+				case err != nil:
+					st.Login, st.LoginKind = "读不出登录状态", "warn"
+				default:
+					st.Logins = logins
+					st.Login, st.LoginKind = loginBadgeOf(logins)
+				}
 			}
 		}
 	}

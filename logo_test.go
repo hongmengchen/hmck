@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// 每个内置工具的招牌都由 docs/logos 里的 SVG 渲染出来：8 格宽、4 行高，一幅图一个样
+// 每个内置工具的招牌都由 docs/logos 里的 SVG 渲染出来：logoWidth 格宽、logoRowsN 行高，一幅图一个样
 func TestBuiltinLogosRenderFromSVG(t *testing.T) {
 	seen := map[string]string{}
 	for _, key := range []string{"hmck", "kube-token", "npm-token", "glab"} {
@@ -20,8 +20,14 @@ func TestBuiltinLogosRenderFromSVG(t *testing.T) {
 			if n := len([]rune(plain)); n != logoWidth {
 				t.Errorf("%s 第 %d 行应有 %d 格，got %d: %q", key, i, logoWidth, n, plain)
 			}
-			if !hasBraille(plain) {
-				t.Errorf("%s 第 %d 行没有点阵: %q", key, i, plain)
+			if !hasInk(plain) {
+				t.Errorf("%s 第 %d 行没有实心像素: %q", key, i, plain)
+			}
+			for _, r := range plain {
+				if !isQuadRune(r) {
+					t.Errorf("%s 第 %d 行有不是方块字符的字: %q", key, i, r)
+					break
+				}
 			}
 		}
 		full := plainText(strings.Join(rows, "\n"))
@@ -143,9 +149,19 @@ func TestParseCSS(t *testing.T) {
 	}
 }
 
-func hasBraille(s string) bool {
+// 招牌的每一格都是 2×2 的实心方块字符（四分之一/半/整块），不是点阵
+func isQuadRune(r rune) bool {
+	for _, q := range quadRunes {
+		if r == q {
+			return true
+		}
+	}
+	return false
+}
+
+func hasInk(s string) bool {
 	for _, r := range s {
-		if r > 0x2800 && r <= 0x28ff {
+		if r != ' ' {
 			return true
 		}
 	}

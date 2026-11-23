@@ -92,11 +92,11 @@ func TestFetchToolReusesCache(t *testing.T) {
 	tl := tool{Key: "cachefake", Repo: "o/r", Binary: "cachefake",
 		Platforms: []string{runtime.GOOS + "/" + runtime.GOARCH}}
 	st := toolState{Tool: tl, Latest: "1.2.3"}
-	p1, v1, err := fetchTool(st)
+	p1, v1, err := fetchTool(st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p2, v2, err := fetchTool(st)
+	p2, v2, err := fetchTool(st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +105,40 @@ func TestFetchToolReusesCache(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(p2); !bytes.Equal(got, payload) {
 		t.Error("缓存内容不对")
+	}
+}
+
+// 下载时得把进度报出来，TUI 和命令行据此画进度条：
+// 至少要有开始和结束两帧，最后一帧正好是文件大小，中间不能倒退
+func TestFetchToolReportsProgress(t *testing.T) {
+	payload := bytes.Repeat([]byte("BINARY"), 40_000)
+	srv := fakeReleaseServer(t, payload, "")
+	defer srv.Close()
+
+	old := releaseAssetURL
+	releaseAssetURL = func(repo, tag, asset string) string { return srv.URL + "/download/" + tag + "/" + asset }
+	defer func() { releaseAssetURL = old }()
+
+	tl := tool{Key: "progfake", Repo: "o/r", Binary: "progfake",
+		Platforms: []string{runtime.GOOS + "/" + runtime.GOARCH}}
+	var reports []int64
+	_, _, err := fetchTool(toolState{Tool: tl, Latest: "2.0.0"}, func(done, _ int64) {
+		reports = append(reports, done)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) < 2 {
+		t.Fatalf("至少要报开始和结束两帧，实际 %v", reports)
+	}
+	if last := reports[len(reports)-1]; last != int64(len(payload)) {
+		t.Errorf("最后一帧应当是文件大小 %d，实际 %d", len(payload), last)
+	}
+	for i := 1; i < len(reports); i++ {
+		if reports[i] < reports[i-1] {
+			t.Errorf("进度倒退了: %v", reports)
+			break
+		}
 	}
 }
 
@@ -197,7 +231,7 @@ func TestInstallToolWithChecksum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := installTool(toolState{Tool: tl, Path: target, Installed: "0.0.1", Latest: "9.9.9"})
+	got, err := installTool(toolState{Tool: tl, Path: target, Installed: "0.0.1", Latest: "9.9.9"}, nil)
 	if err != nil {
 		t.Fatalf("installTool: %v", err)
 	}
@@ -234,7 +268,7 @@ func TestInstallToolChecksumMismatch(t *testing.T) {
 	os.WriteFile(target, []byte("old"), 0o755)
 
 	// 用不同的版本号，避免复用到上一个用例下载好的缓存
-	if _, err := installTool(toolState{Tool: tl, Path: target, Latest: "9.9.8"}); err == nil {
+	if _, err := installTool(toolState{Tool: tl, Path: target, Latest: "9.9.8"}, nil); err == nil {
 		t.Fatal("校验不匹配却成功了")
 	}
 	content, _ := os.ReadFile(target)
@@ -246,7 +280,7 @@ func TestInstallToolChecksumMismatch(t *testing.T) {
 func TestInstallToolUnsupportedPlatform(t *testing.T) {
 	isolateConfig(t)
 	tl := tool{Key: "fake", Repo: "o/r", Binary: "fake", Platforms: []string{"plan9/mips"}}
-	if _, err := installTool(toolState{Tool: tl, Latest: "1.0.0"}); err == nil {
+	if _, err := installTool(toolState{Tool: tl, Latest: "1.0.0"}, nil); err == nil {
 		t.Error("不支持的平台应当报错")
 	}
 }
@@ -446,7 +480,7 @@ func TestAnyKeyLeavesResult(t *testing.T) {
 	}
 }
 
-// 列表页左边是 hmck 的招牌：docs/logos/hmck.svg 渲染成的盲文点阵
+// 列表页左边是 hmck 的招牌：docs/logos/hmck.svg 渲染成的象限方块
 func TestListViewShowsLogo(t *testing.T) {
 	m := newTUIModel()
 	m.width, m.height = 100, 40
@@ -469,6 +503,78 @@ func TestListViewShowsLogo(t *testing.T) {
 	}
 	if first := strings.SplitN(got, "\n", 2)[0]; !strings.Contains(first, plainText(logo[0])) || !strings.Contains(first, "hmck") {
 		t.Errorf("第一行应是招牌 + 标题，got %q", first)
+	}
+}
+
+// 「处理中」界面在下载时得画出进度：百分比、已下载 / 总大小，还有按宽度收放的进度条
+func TestWorkingViewShowsProgressBar(t *testing.T) {
+	m := newTUIModel()
+	m.width = 80
+	m.state = working
+	m.workText = "正在下载 kube-token"
+	m.progBytes, m.progDone = 1<<20, 1<<19 // 1 MB 里下了 512 KB
+
+	got := plainText(m.viewWorking())
+	if !strings.Contains(got, " 50%") {
+		t.Fatalf("没有百分比:\n%s", got)
+	}
+	if !strings.Contains(got, "512 KB / 1.0 MB") {
+		t.Errorf("没有大小:\n%s", got)
+	}
+	// 宽度 80 时条长 30 格（80-38），一半就是 15 个实心
+	if !strings.Contains(got, strings.Repeat(barFill, 15)+strings.Repeat(barEmpty, 15)) {
+		t.Errorf("进度条没画到一半:\n%s", got)
+	}
+	if !strings.Contains(got, "正在下载 kube-token") {
+		t.Errorf("丢了正在做什么:\n%s", got)
+	}
+}
+
+// 对方没给 Content-Length 时画不出比例，只报已下载多少；一键更新时按「第几个 + 这个下到哪」合成一条
+func TestProgressBarUnknownLengthAndBatch(t *testing.T) {
+	m := newTUIModel()
+	m.width = 80
+	m.state = working
+	m.progDone = 3 << 20 // 已下 3 MB，不知道总大小
+
+	got := plainText(m.viewWorking())
+	if strings.Contains(got, "%") || !strings.Contains(got, "已下载 3.0 MB") {
+		t.Errorf("长度未知时应当只报已下载:\n%s", got)
+	}
+
+	// 四个工具更新到第二个，当下这个文件下一半：整体 37.5%，四舍五入 38%
+	m.progIndex, m.progTotal = 2, 4
+	m.progDone, m.progBytes = 512, 1024
+	got = plainText(m.viewWorking())
+	if !strings.Contains(got, " 38%") {
+		t.Errorf("一键更新应当按整体进度算:\n%s", got)
+	}
+}
+
+// 下载进度消息只在当前这轮、还在处理时生效：过期的要丢掉，批量序号也要跟着走
+func TestProgMsgUpdatesBar(t *testing.T) {
+	m := newTUIModel()
+	m.state = working
+	m.updGen = 3
+	m.updCh = make(chan tea.Msg, 4)
+
+	updated, cmd := m.Update(progMsg{gen: 3, done: 100, bytes: 400})
+	got := updated.(tuiModel)
+	if got.progDone != 100 || got.progBytes != 400 {
+		t.Fatalf("没记下进度: %d/%d", got.progDone, got.progBytes)
+	}
+	if cmd == nil {
+		t.Error("应当继续等下一条进度")
+	}
+
+	updated, _ = got.Update(progMsg{gen: 2, done: 300, bytes: 400})
+	if after := updated.(tuiModel); after.progDone != 100 {
+		t.Errorf("过期 gen 的进度不该生效: %d", after.progDone)
+	}
+
+	updated, _ = got.Update(progMsg{gen: 3, index: 2, total: 5, done: 10, bytes: 20})
+	if after := updated.(tuiModel); after.progIndex != 2 || after.progTotal != 5 {
+		t.Errorf("批量序号没更新: %d/%d", after.progIndex, after.progTotal)
 	}
 }
 
@@ -703,5 +809,83 @@ func TestNewerFile(t *testing.T) {
 	}
 	if newerFile(older, filepath.Join(dir, "missing")) != true {
 		t.Error("目标不存在时应当复制")
+	}
+}
+
+// kubectl 在 dl.k8s.io 发版：最新版读 stable.txt，资产按 平台/架构 分目录，
+// 校验值是资产旁边同名的 .sha256（里面只有一行哈希）
+func TestKubernetesLatestTag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/stable.txt" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprintln(w, "v1.37.2")
+	}))
+	defer srv.Close()
+
+	old := kubernetesStableURL
+	kubernetesStableURL = func() string { return srv.URL + "/stable.txt" }
+	defer func() { kubernetesStableURL = old }()
+
+	tag, err := latestTag(tool{Key: "kubectl", Host: "kubernetes", Repo: "kubernetes/kubernetes"})
+	if err != nil || tag != "v1.37.2" {
+		t.Fatalf("latestTag = %q, %v", tag, err)
+	}
+
+	// stable.txt 里不是版本号时要说清楚，别把整段文字当版本
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "<html>oops</html>")
+	}))
+	defer bad.Close()
+	kubernetesStableURL = func() string { return bad.URL }
+	if _, err := latestTag(tool{Host: "kubernetes"}); err == nil {
+		t.Error("stable.txt 内容不对时应当报错")
+	}
+}
+
+func TestKubernetesAssetURL(t *testing.T) {
+	tl := tool{Key: "kubectl", Host: "kubernetes", Binary: "kubectl", Asset: "kubectl{ext}"}
+	asset := assetName(tl, runtime.GOOS, runtime.GOARCH, "v1.37.2")
+	want := "https://dl.k8s.io/release/v1.37.2/bin/" + runtime.GOOS + "/" + runtime.GOARCH + "/" + asset
+	if got := releaseAssetURLFor(tl, "v1.37.2", asset); got != want {
+		t.Errorf("资产地址 = %q，想要 %q", got, want)
+	}
+	if runtime.GOOS == "windows" && asset != "kubectl.exe" {
+		t.Errorf("Windows 的资产名 = %q", asset)
+	}
+}
+
+func TestVerifyKubernetesChecksum(t *testing.T) {
+	payload := bytes.Repeat([]byte("KUBECTL"), 20_000)
+	sum := sha256.Sum256(payload)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/kubectl.sha256") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprintln(w, hex.EncodeToString(sum[:]))
+	}))
+	defer srv.Close()
+
+	old := kubernetesAssetURL
+	kubernetesAssetURL = func(tag, goos, goarch, asset string) string {
+		return srv.URL + "/" + tag + "/" + asset
+	}
+	defer func() { kubernetesAssetURL = old }()
+
+	file := filepath.Join(t.TempDir(), "kubectl")
+	if err := os.WriteFile(file, payload, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tl := tool{Key: "kubectl", Host: "kubernetes", Binary: "kubectl", Asset: "kubectl{ext}", Checksums: true}
+	if err := verifyChecksum(tl, "v1.37.2", "kubectl", file); err != nil {
+		t.Errorf("校验应当通过: %v", err)
+	}
+	if err := os.WriteFile(file, []byte("tampered"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyChecksum(tl, "v1.37.2", "kubectl", file); err == nil {
+		t.Error("内容和哈希对不上时应当失败")
 	}
 }

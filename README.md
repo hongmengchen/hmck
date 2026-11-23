@@ -16,36 +16,47 @@
 | [kube-token](https://github.com/hongmengchen/kube-token) | 粘贴新 token 替换 kubeconfig 里的旧值 |
 | [npm-token](https://github.com/hongmengchen/npm-token) | 检查并更新 `~/.npmrc` 里的 registry token |
 | [glab](https://gitlab.com/gitlab-org/cli) | GitLab 官方 CLI：MR、issue、流水线都在终端里；装了就能看登录状态 |
+| [kubectl](https://kubernetes.io/docs/reference/kubectl/) | Kubernetes 命令行（`dl.k8s.io` 发版）：看当前 context、API server、连不连得上 |
 | [hmck](https://github.com/hongmengchen/hmck) | 它自己——`hmck upgrade` 会把自己也升到最新 |
 
 以后新增的工具不用改代码：`hmck add owner/repo` 存进本机配置，立刻就能装、能升级。
 
 ```
 $ hmck
-⣴⣿⣤⣤⣤⣤⣿⣦  hmck  我的命令行小工具
-⣿⠙⠓⣲⡖⠚⠋⣿  4 个工具 · 2 个可更新
-⣿⣠⡈⠡⠄⢀⣄⣿  a 自动下载最新版 [关]    A 自动安装最新版 [关]
-⠻⣿⠛⠛⠛⠛⣿⠟
+▀█▄           hmck  我的命令行小工具
+  ▀█▄         4 个工具 · 2 个可更新 · 检查于 09:41:02
+    ▀█▄       a 自动下载最新版 [关]    A 自动安装最新版 [关]
+    ▄█▀
+  ▄█▀
+▄█▀    █████
 
-▌ ⣴⣿⣿⠠⣤⡀⣿⣦  kube-token  ✓ 0.8.0                                                              10 小时前更新
-▌ ⣿⠚⠋⣠⣄⣿⠓⣿     粘贴新 token 替换 kubeconfig 里的旧值                       /Users/me/.local/bin/kube-token
-▌ ⣿⢤⣿⠙⠋⣠⡤⣿  hongmengchen/kube-token  ·  v0.8.0  Vault 登录缓存：第一次按 v 输入密码…
-▌ ⠻⣿⠈⠛⠂⣿⣿⠟
-  ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ⣴⣿⣤⣤⣤⣤⣿⣦  npm-token   ✓ 0.5.0                                                               3 小时前更新
-│ ⣿⠙⠁⣤⣤⠈⠋⣿     检查并更新 ~/.npmrc 里的 registry token                      /Users/me/.local/bin/npm-token
-│ ⣿⣠⡀⠛⠛⢀⣄⣿  hongmengchen/npm-token  ·  v0.5.0  npm-token 有了自己的标志…
-│ ⠻⣿⠛⠛⠛⠛⣿⠟
-  ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ⢀⣶    ⣶⡀  glab        ↑ 1.130.0 → 1.131.0                                                     3 天前更新
-│ ⣼⣿⣷⣶⣶⣾⣿⣧     GitLab 命令行：MR、issue、流水线都在终端里                        /Users/me/.local/bin/glab
-│ ⠻⣿⠈⣀⣀⠁⣿⠟  gitlab-org/cli  ·  已登录 alice  ·  v1.131.0  新增 glab attestation…
-│  ⠈⠙⢿⡿⠋⠁
-  ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ⣴⣿⣤⣤⣤⣤⣿⣦  hmck        ↑ 0.9.0 → 0.10.0                                                          刚刚更新
-│ ⣿⠙⠓⣲⡖⠚⠋⣿     管理这些命令行小工具，包括它自己                                  /Users/me/.local/bin/hmck
-│ ⣿⣠⡈⠡⠄⢀⣄⣿  hongmengchen/hmck  ·  v0.10.0  所有工具都能卸载，包括它自己…
-│ ⠻⣿⠛⠛⠛⠛⣿⠟
+▌    ██████
+▌  ▄█▀    ▀█▄   kube-token  ✓ 0.8.0                                                        10 小时前更新
+▌ ██   ▄▄   ██  粘贴新 token 替换 kubeconfig 里的旧值                    /Users/me/.local/bin/kube-token
+▌ ██   ▀▀   ██  hongmengchen/kube-token  ·  v0.8.0  Vault 登录缓存：第一次按 v 输入密码…
+▌  ▀█▄    ▄█▀
+▌    ██████
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────
+│    ▗▛▀▀▜▖
+│    ▐▌  ▐▌     npm-token   ✓ 0.5.0                                                         3 小时前更新
+│   ▗▟▙▄▄▟▙▖    检查并更新 ~/.npmrc 里的 registry token                   /Users/me/.local/bin/npm-token
+│   ████████    hongmengchen/npm-token  ·  v0.5.0  npm-token 有了自己的标志…
+│   ███▌▐███
+│   ▜██████▛
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────
+│  ▗▙      ▟▖
+│ ▗██▌    ▐██▖  glab        ↑ 1.130.0 → 1.131.0                                               3 天前更新
+│ ▄▀▀██████▀▀▄  GitLab 命令行：MR、issue、流水线都在终端里                     /Users/me/.local/bin/glab
+│ ▜█▙▄▀▜▛▀▄▟█▛  gitlab-org/cli  ·  已登录 alice  ·  v1.131.0  新增 glab attestation…
+│  ▝▀█▀▘▘▀█▀▘
+│     ▀▜▛▀
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────
+│ ▀█▄
+│   ▀█▄         hmck        ↑ 0.9.0 → 0.10.3                                                    刚刚更新
+│     ▀█▄       管理这些命令行小工具，包括它自己                               /Users/me/.local/bin/hmck
+│     ▄█▀       hongmengchen/hmck  ·  v0.10.3  所有工具都能卸载，包括它自己…
+│   ▄█▀
+│ ▄█▀    █████
 
   ↑↓ 选择  ·  enter 启动/安装  ·  u 升级  ·  U 全部更新  ·  i 信息  ·  g 更新日志  ·  d 卸载
   s 装 skill  ·  r 重新检查  ·  q 退出
@@ -53,7 +64,7 @@ $ hmck
 
 打开后先列出本地工具（版本、安装位置），最新版在后台查询；查到哪个就刷新哪张卡片，查询期间那一格显示转圈，不用对着一个空白的加载页等网络。每个工具占一块，中间用淡线隔开：左边是该工具自己的招牌，右边三行分别是「名称和版本」「它干什么 / 装在哪」「仓库和最近一版改了什么」。
 
-招牌不是手画的字符，是 [`docs/logos`](docs/logos) 里各工具自己的 SVG（glab 用的是 GitLab 官方 press kit 的狸猫）编进程序后，运行时画成 16×16 点阵、折成盲文字符，颜色取 SVG 里的原色：hmck 的深色方块加绿色箭头、kube-token 的六边形和蓝色菱形、npm-token 的方块和红点。终端颜色少的时候由 lipgloss 自己降级，不依赖图片文件、字体或网络；自定义工具和读不出 SVG 的工具，还是退回方框加名字首字母。
+招牌是 [`docs/logos`](docs/logos) 里各工具自己的 SVG（glab 用的是 GitLab 官方 press kit 的狸猫）编进程序后，运行时光栅成 24×12 个像素、再折成 12 列 × 6 行的象限字符（`▘▀▖▌▛█` 这些实心方块），颜色取 SVG 里的原色：hmck 是绿色箭头（`>` 当提示符，右边一条下划线，就是 `hmck` 三个字母里那个横）、kube-token 是蓝色六边形框里一颗核心、npm-token 是红挂锁。造型是照着终端网格手摆的像素画，不是把普通矢量图缩下来——缩下来的图在这个尺寸上会糊成一块。终端颜色少的时候由 lipgloss 自己降级，不依赖图片文件、字体或网络；自定义工具和读不出 SVG 的工具，还是退回方框加名字首字母。
 
 第三行的更新日志预览是启动时顺手从各仓库的 `CHANGELOG.md` 抓回来的（没有就退到 release notes），失败也不影响列表。自定义工具用同款方框放名字首字母。
 
@@ -69,7 +80,7 @@ $ hmck
 
 第一行最右边是**上一次版本更新时间**：hmck 自己装上/升级成功时记进 `state.json`（和 `config.json` 同目录），显示成「刚刚更新 / 3 小时前更新 / 12 天前更新」，超过一个月给日期。不是 hmck 装的（手动替换、从别处拷过来的），就用二进制文件的修改时间兜底，所以每个装好的工具都有时间可看。
 
-`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`i` 看当前状况（glab 的登录状态在这一页）；`g` 看选中工具的更新日志；`d` 卸载；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
+`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`i` 看当前状况（glab 的登录状态、kubectl 的集群状态在这一页）；`g` 看选中工具的更新日志；`d` 卸载；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
 
 ### 更新日志
 
@@ -101,10 +112,17 @@ hmck changelog kube-token --versions 2
 - `○ 还没登录`——提示在终端里跑 `glab auth login`；
 - 登录过多台主机时，其余主机用「其他主机」一行列出来。
 
-再往下是每个工具都有的：已装版本、最新版、装在哪、上次更新时间、PATH 上的其他副本、仓库。hmck 只跑 `glab auth status`，不读 token 本身。
+装了 kubectl 时第一行是集群状态（只读，不打印 kubeconfig 里的证书和 token）：
+
+- `✓ 已连通 Sought`——跟着是当前 context、集群、API server 地址、服务端版本；
+- `! Sought 连不上`——说明是 token 过期、超时还是地址不通（token 过期会提示用 `kube-token` 换新）；
+- `○ 没有当前 context`——提示在终端里跑 `kubectl config use-context`。
+
+再往下是每个工具都有的：已装版本、最新版、装在哪、上次更新时间、PATH 上的其他副本、仓库。hmck 只跑 `glab auth status` 和 `kubectl config view` / `kubectl version`，不读 token、证书本身。
 
 ```bash
 hmck info glab               # 终端里看同一份；--json 给脚本用
+hmck info kubectl            # 当前 context、API server、服务端版本、连通性
 ```
 
 ### 卸载
@@ -165,15 +183,16 @@ hmck upgrade npm-token    # 只升一个
 hmck upgrade --force      # 已是最新也重装一遍
 hmck changelog npm-token  # 看最近几个版本改了什么（--versions N）
 hmck info glab            # 版本、位置，glab 还有登录状态（--json 给脚本）
+hmck info kubectl         # 当前 context、API server、服务端版本、连不连得上
 hmck uninstall npm-token  # 卸掉 hmck 装的那份（先敲工具名确认；--yes 跳过）
 hmck skill                # 给 hmck 和已安装的工具装 agent skill
 ```
 
-版本检测：已安装版本读 `<tool> version`；最新版看 GitHub `releases/latest` 的跳转（不消耗 API 限流），失败再退回 API。
+版本检测：已安装版本读 `<tool> version`（kubectl 用 `version --client`，不连集群）；最新版看 GitHub `releases/latest` 的跳转（不消耗 API 限流），失败再退回 API。kubectl 走 `dl.k8s.io`：最新版读 `stable.txt`，资产按平台分目录下载，校验的是资产旁边同名的 `.sha256`。
 
 安装位置：统一放在 `~/.local/bin`（Windows 是 `%USERPROFILE%\.local\bin`）；hmck 自己装在系统目录（如 `/usr/local/bin`）时，新工具跟着它放在同一目录。工具已经在 PATH 里就在原位置升级。内置工具的 release 都带 `checksums.txt`，安装和升级会校验 SHA-256。
 
-glab 是个例外（brew / apt 装的人太多）：hmck 只认自己目录里的那一份，不接管 PATH 上别人装的副本——卡片上会注明「PATH 上已有一份」，`hmck uninstall glab` 也只删自己那份。按 `enter` 启动的就是那一份（hmck 自己装过的话它排在前面，没有也不另装第二个副本——两个 glab 并存会把人和 agent 一直在用的那份顶掉）；按 `u` 只说明它归谁管、该用谁升级。卸不卸由你按 `d` 决定。
+glab 和 kubectl 是个例外（brew / apt 装的 glab、Docker Desktop 自带的 kubectl 太多）：hmck 只认自己目录里的那一份，不接管 PATH 上别人装的副本——卡片上会注明「PATH 上已有一份」，`hmck uninstall glab` 也只删自己那份。按 `enter` 启动的就是那一份（hmck 自己装过的话它排在前面，没有也不另装第二个副本——两个 glab 并存会把人和 agent 一直在用的那份顶掉）；按 `u` 只说明它归谁管、该用谁升级。状态照样读得出来：glab 看登录，kubectl 看集群。卸不卸由你按 `d` 决定。
 
 从旧版升级（Windows 以前装在 `%LOCALAPPDATA%\<tool>`）时，第一次运行新版 hmck 会把二进制搬到统一目录，并把用户 PATH 里的旧目录换成新目录。配置不在安装目录里，`%AppData%\hmck`、`%AppData%\kube-token`、`~/.npmrc` 和 `~/.claude/skills` 都原样保留，不需要重新配置。
 
@@ -233,6 +252,7 @@ hmck rm my-tool                 # 只删配置，不删已装的二进制
 ```
 
 发布在 GitLab 的加 `Host: "gitlab"`（最新版、下载、更新日志都走 GitLab API，见 glab 那条）；
+`kubectl` 那条用的是内置的 `Host: "kubernetes"`（最新版读 `dl.k8s.io/release/stable.txt`，资产和 `.sha256` 也在 `dl.k8s.io`），自定义工具一般用不到；
 资产名不是 `<key>_<goos>_<goarch>` 的用 `Asset` 模板（`{ver}` `{goos}` `{goarch}` `{archive}` 等），
 发压缩包的开 `Archive`；只想管自己装的那份、不接管 PATH 上别人装的（brew 一类）就开 `OwnDir`。
 

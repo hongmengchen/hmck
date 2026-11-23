@@ -14,7 +14,7 @@ import (
 	"github.com/hongmengchen/tui/theme"
 )
 
-var version = "0.10.2"
+var version = "0.10.3"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -474,7 +474,12 @@ func doInstall(st toolState, force bool) int {
 	}
 	fmt.Printf("%s: %s → %s，下载中…\n", t.Key, from, latest)
 
-	newVer, err := installTool(st)
+	// 真终端里另起一行画下载进度；脚本、agent 里 stdout 不是终端，什么都不画
+	bar := downloadBar()
+	newVer, err := installTool(st, bar)
+	if bar != nil {
+		fmt.Printf("\r%-*s\r", progressLineWidth, "") // 擦掉进度行，结果从行首接着写
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: 升级失败: %v\n", t.Key, err)
 		return 1
@@ -486,6 +491,42 @@ func doInstall(st toolState, force bool) int {
 		fmt.Printf("%s: %s 已就绪  %s\n", t.Key, newVer, shortenHome(path))
 	}
 	return 0
+}
+
+// progressLineWidth 是进度行补齐到的宽度：每帧用空格补满，下一次覆盖时
+// 不会留下上一次更长的尾巴。不用转义序列擦行，Windows 的老控制台也认
+const progressLineWidth = 56
+
+// downloadBar 在真终端里把下载进度画在同一行上。stdout 不是终端时返回 nil，
+// 不往管道和日志里塞 \r
+func downloadBar() progressFunc {
+	if !isTTY(os.Stdout) {
+		return nil
+	}
+	return func(done, total int64) {
+		if line := downloadLine(done, total); line != "" {
+			fmt.Printf("\r%-*s", progressLineWidth, line)
+		}
+	}
+}
+
+// downloadLine 把进度写成一行：进度条、百分比、已下载 / 总量。
+// 对方没给 Content-Length 时画不出比例，只说已下载多少
+func downloadLine(done, total int64) string {
+	if done == 0 && total == 0 {
+		return "" // 还没拿到任何信息，先不出声
+	}
+	const width = 24
+	frac := 0.0
+	if total > 0 {
+		frac = min(float64(done)/float64(total), 1)
+	}
+	filled := int(frac*width + 0.5)
+	bar := strings.Repeat(barFill, filled) + strings.Repeat(barEmpty, width-filled)
+	if total <= 0 {
+		return "  " + bar + "  已下载 " + humanSize(done)
+	}
+	return fmt.Sprintf("  %s  %3d%%  %s / %s", bar, int(frac*100+0.5), humanSize(done), humanSize(total))
 }
 
 // ---------- changelog ----------
@@ -515,7 +556,7 @@ func runChangelog(args []string) int {
 		current = version
 	default:
 		if p, found := findTool(t); found {
-			current = installedVersion(p)
+			current = installedVersion(t, p)
 		}
 	}
 

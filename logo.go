@@ -16,26 +16,28 @@ import (
 )
 
 // 招牌用的就是各工具仓库里的真 SVG（glab 是 GitLab 官方的狸猫）。
-// 终端放不下图片，所以把 SVG 光栅化成 16×16 点阵，再折成盲文字符：
-// 一个字符格是 2 列 × 4 行点，一块招牌正好 8 列 × 4 行，颜色走真实色值，
-// 终端颜色少的时候由 lipgloss 自己降级。
+// 终端放不下图片，所以把 SVG 光栅成 24×12 个像素，再用象限字符（▘▝▀▖▌…█）
+// 一个字符格画 2×2 个实心像素：一块招牌 12 列 × 6 行。
+// 字符格是半宽一格的，所以像素按 2:1 的网格取样，画出来才是方的；
+// 像素是实心的，边缘只会是台阶，不会像盲文那样是一串断开的点。
+// 颜色走真实色值，终端颜色少的时候由 lipgloss 自己降级。
 //
 //go:embed docs/logos/*.svg
 var logoSVGs embed.FS
 
 const (
-	logoDots  = 16 // 光栅边长（点）
-	logoSS    = 4  // 每个点取 4×4 个采样，边缘就不毛糙
-	logoWidth = logoDots / 2
-	logoRowsN = logoDots / 4
+	// logoWidth 是招牌的字符宽度；像素网格比它宽一倍（像素是半个字符宽、一个字符高）
+	logoWidth = 12
+	logoDots  = logoWidth * 2 // 光栅横向像素数
+	logoRowsN = logoWidth / 2 // 字符行数
 
-	// 细线在 16 点阵上会细到看不见：统一撑到这个宽度（单位：点）
+	logoSS = 4 // 每个像素取 4×4 个采样，边缘落在半个像素上也能定下来
+
+	// 细线在 12 行的像素网格上会细到看不见：统一撑到这个宽度（单位：像素行）
 	minStrokeDots = 1.4
-	// 一个点里混了这么多背景色就算「有墨」
-	inkDist = 48.0
 )
 
-// toolLogo 取工具的招牌：内置工具把 docs/logos/<key>.svg 渲染成盲文点阵；
+// toolLogo 取工具的招牌：内置工具把 docs/logos/<key>.svg 渲染成方块字符；
 // 自定义工具、或者 SVG 读不出来时，退回手画的方框和首字母
 func toolLogo(t tool) []string {
 	key := strings.ToLower(strings.TrimSpace(t.Key))
@@ -54,7 +56,7 @@ var logoCache sync.Map // tool key -> []string
 
 func resetLogoCache() { logoCache = sync.Map{} }
 
-// svgLogo 把一张内嵌的 SVG 渲染成 8×4 个带颜色的字符格
+// svgLogo 把一张内嵌的 SVG 渲染成 logoWidth × logoRowsN 个带颜色的字符格
 func svgLogo(key string) []string {
 	raw, err := logoSVGs.ReadFile("docs/logos/" + key + ".svg")
 	if err != nil {
@@ -371,7 +373,7 @@ func newSub(pts []logoPoint) logoSub {
 	return sub
 }
 
-// roundedRectPoints 用每段 6 条小线段画圆角，16 点阵上足够圆
+// roundedRectPoints 用每段 6 条小线段画圆角，24×12 的点阵上足够圆
 func roundedRectPoints(x, y, w, h, rx, ry float64) []logoPoint {
 	if rx <= 0 || ry <= 0 {
 		return []logoPoint{{x, y}, {x + w, y}, {x + w, y + h}, {x, y + h}}
@@ -689,6 +691,12 @@ type logoDot struct {
 }
 
 func rasterizeLogo(img *logoImage) []logoDot {
+	return rasterizeLogoRect(img, logoDots, logoDots/2)
+}
+
+// rasterizeLogoRect 允许横竖用不同的点数：终端字符是 1:2 的，
+// 半块/象限字符一个格子里横竖的像素数本来就不一样，方形取样反而会拉扁图案
+func rasterizeLogoRect(img *logoImage, nx, ny int) []logoDot {
 	// 按内容裁到正方形：GitLab 官方的 SVG 四周留白很多，
 	// 不裁的话狸猫只有中间几个点大；自己的方框招牌本来就铺满，裁了也一样
 	minX, minY, maxX, maxY := img.minX, img.minY, img.minX+img.w, img.minY+img.h
@@ -708,7 +716,8 @@ func rasterizeLogo(img *logoImage) []logoDot {
 	minX -= (side - (maxX - minX)) / 2
 	minY -= (side - (maxY - minY)) / 2
 
-	scale := float64(logoDots) / side
+	// 描边最细只到「一个矮的那个方向的像素」，再细也会被取样吞掉
+	scale := float64(min(nx, ny)) / side
 	halfs := make([]float64, len(img.shapes))
 	for i, sh := range img.shapes {
 		if !sh.hasStroke || sh.strokeW <= 0 {
@@ -721,15 +730,15 @@ func rasterizeLogo(img *logoImage) []logoDot {
 		halfs[i] = w / 2
 	}
 
-	out := make([]logoDot, logoDots*logoDots)
+	out := make([]logoDot, nx*ny)
 	samples := float64(logoSS * logoSS)
-	for dy := 0; dy < logoDots; dy++ {
-		for dx := 0; dx < logoDots; dx++ {
+	for dy := 0; dy < ny; dy++ {
+		for dx := 0; dx < nx; dx++ {
 			var r, g, b, a float64
 			for sy := 0; sy < logoSS; sy++ {
 				for sx := 0; sx < logoSS; sx++ {
-					x := minX + (float64(dx)+(float64(sx)+0.5)/logoSS)*side/logoDots
-					y := minY + (float64(dy)+(float64(sy)+0.5)/logoSS)*side/logoDots
+					x := minX + (float64(dx)+(float64(sx)+0.5)/logoSS)*side/float64(nx)
+					y := minY + (float64(dy)+(float64(sy)+0.5)/logoSS)*side/float64(ny)
 					var sr, sg, sb, sa float64
 					for i := range img.shapes {
 						sh := &img.shapes[i]
@@ -755,7 +764,14 @@ func rasterizeLogo(img *logoImage) []logoDot {
 			if a > 0 {
 				d.r, d.g, d.b = r/a, g/a, b/a
 			}
-			out[dy*logoDots+dx] = d
+			// 方块像素没有「半覆盖」：一个点亮或者不亮。取样过半就算亮，
+			// 这样边缘只是一级级的台阶，不会出现一圈淡色毛边
+			if d.a >= 0.5 {
+				d.a = 1
+			} else {
+				d.a = 0
+			}
+			out[dy*nx+dx] = d
 		}
 	}
 	return out
@@ -829,21 +845,26 @@ func segDist2(a, b logoPoint, x, y float64) float64 {
 	l2 := dx*dx + dy*dy
 	t := 0.0
 	if l2 > 0 {
-		t = ((x - a.x) * dx) / l2
+		// 投影要同时算 x 和 y：只算 x 的话斜线段的距离会算错，
+		// 粗描边就会断成一截一截
+		t = ((x-a.x)*dx + (y-a.y)*dy) / l2
 		t = math.Max(0, math.Min(1, t))
 	}
 	px, py := a.x+t*dx, a.y+t*dy
 	return (x-px)*(x-px) + (y-py)*(y-py)
 }
 
-// ---------- 点阵 -> 盲文字符 ----------
+// ---------- 像素 -> 象限字符 ----------
 
-// 盲文一个格子是 2 列 × 4 行，[行][列] 对应的点位
-var brailleBits = [4][2]rune{
-	{0x01, 0x08},
-	{0x02, 0x10},
-	{0x04, 0x20},
-	{0x40, 0x80},
+// 一个格子 = 2×2 个方形像素，正好是一个象限字符能画满的东西。
+// 盲文点分辨率高，但点和点之间是断开的：边缘永远是一串珠子，
+// 半覆盖也没法表达，只能靠阈值切，看着就「毛」。象限字符是实心的，
+// 4 个像素能原样画出来，斜边收成一级级台阶。
+var quadRunes = [16]rune{
+	' ', '▘', '▝', '▀', // 0000 0001 0010 0011
+	'▖', '▌', '▞', '▛', // 0100 0101 0110 0111
+	'▗', '▚', '▐', '▜', // 1000 1001 1010 1011
+	'▄', '▙', '▟', '█', // 1100 1101 1110 1111
 }
 
 type logoCell struct {
@@ -854,111 +875,89 @@ type logoCell struct {
 	hasBG bool
 }
 
-// logoCells 把点阵折成字符格。每格挑一个底色，和底色不一样的墨点开成盲文点：
-// 方框招牌整格都是底色时就画成实心块，没有底色的地方留白（终端自己的背景）
+// logoCells 把像素折成字符格：一格 2×2 个像素
 func logoCells(pix []logoDot) [][]logoCell {
 	rows := make([][]logoCell, logoRowsN)
 	for cy := 0; cy < logoRowsN; cy++ {
 		row := make([]logoCell, logoWidth)
 		for cx := 0; cx < logoWidth; cx++ {
-			var dots [4][2]logoDot
-			opaque := 0
-			for j := 0; j < 4; j++ {
+			var q [2][2]logoDot
+			for j := 0; j < 2; j++ {
 				for i := 0; i < 2; i++ {
-					d := pix[(cy*4+j)*logoDots+cx*2+i]
-					dots[j][i] = d
-					if d.a >= 0.88 {
-						opaque++
-					}
+					q[j][i] = pix[(cy*2+j)*logoDots+cx*2+i]
 				}
 			}
-			row[cx] = makeCell(dots, opaque == 8)
+			row[cx] = makeQuadCell(q)
 		}
 		rows[cy] = row
 	}
 	return rows
 }
 
-func makeCell(dots [4][2]logoDot, full bool) logoCell {
-	if full {
-		bg := majorityColor(dots)
-		var mask rune
-		var fr, fg, fb, n float64
-		for j := 0; j < 4; j++ {
-			for i := 0; i < 2; i++ {
-				d := dots[j][i]
-				if colorDist(d, bg) <= inkDist {
-					continue
-				}
-				mask |= brailleBits[j][i]
-				fr += d.r
-				fg += d.g
-				fb += d.b
-				n++
-			}
-		}
-		if mask == 0 {
-			// 整格一个颜色：画成实心块，底色也用同一个颜色，
-			// 相邻格子拼起来没有缝
-			return logoCell{ch: '⣿', fg: bg, bg: bg, hasFG: true, hasBG: true}
-		}
-		return logoCell{
-			ch: 0x2800 + mask,
-			fg: rgba(fr/n, fg/n, fb/n),
-			bg: bg, hasFG: true, hasBG: true,
-		}
+// makeQuadCell 把一格的 4 个像素折成一个字符。一个字符只有前/背景两种颜色，
+// 所以点最多的那种颜色当墨色，同色的像素按象限位画出来；另一种颜色当底色，
+// 这样两种颜色的格子也是一整块，不会漏出终端背景的缝
+func makeQuadCell(q [2][2]logoDot) logoCell {
+	type entry struct {
+		k [3]uint8
+		c color.RGBA
+		n int
 	}
-
-	var mask rune
-	var fr, fg, fb, w float64
-	for j := 0; j < 4; j++ {
+	keyOf := func(d logoDot) [3]uint8 {
+		c := rgba(d.r, d.g, d.b)
+		return [3]uint8{c.R, c.G, c.B}
+	}
+	var cols []entry
+	for j := 0; j < 2; j++ {
 		for i := 0; i < 2; i++ {
-			d := dots[j][i]
-			if d.a < 0.45 {
+			d := q[j][i]
+			if d.a == 0 {
 				continue
 			}
-			mask |= brailleBits[j][i]
-			fr += d.r * d.a
-			fg += d.g * d.a
-			fb += d.b * d.a
-			w += d.a
+			c := rgba(d.r, d.g, d.b)
+			k := keyOf(d)
+			idx := -1
+			for e := range cols {
+				if cols[e].k == k {
+					idx = e
+					break
+				}
+			}
+			if idx < 0 {
+				cols = append(cols, entry{k: k, c: c})
+				idx = len(cols) - 1
+			}
+			cols[idx].n++
 		}
 	}
-	if mask == 0 {
+	if len(cols) == 0 {
 		return logoCell{ch: ' '}
 	}
-	return logoCell{ch: 0x2800 + mask, fg: rgba(fr/w, fg/w, fb/w), hasFG: true}
-}
-
-// majorityColor 取一格里面最多的那种颜色（量化到 16 级再数）
-func majorityColor(dots [4][2]logoDot) color.RGBA {
-	counts := map[uint32]int{}
-	best, bestN := uint32(0), -1
-	for j := 0; j < 4; j++ {
+	ink, rest := 0, -1
+	for e := range cols {
+		if cols[e].n > cols[ink].n {
+			ink = e
+		}
+	}
+	for e := range cols {
+		if e != ink && (rest < 0 || cols[e].n > cols[rest].n) {
+			rest = e
+		}
+	}
+	mask := 0
+	for j := 0; j < 2; j++ {
 		for i := 0; i < 2; i++ {
-			d := dots[j][i]
-			k := uint32(d.r*15)<<8 | uint32(d.g*15)<<4 | uint32(d.b*15)
-			counts[k]++
-			if counts[k] > bestN {
-				best, bestN = k, counts[k]
+			if d := q[j][i]; d.a > 0 && keyOf(d) == cols[ink].k {
+				mask |= 1 << (j*2 + i)
 			}
 		}
 	}
-	// 用这个桶里实际颜色的平均值，别拿量化后的粗值
-	var r, g, b, n float64
-	for j := 0; j < 4; j++ {
-		for i := 0; i < 2; i++ {
-			d := dots[j][i]
-			if uint32(d.r*15)<<8|uint32(d.g*15)<<4|uint32(d.b*15) != best {
-				continue
-			}
-			r += d.r
-			g += d.g
-			b += d.b
-			n++
-		}
+	cell := logoCell{ch: quadRunes[mask], fg: cols[ink].c, hasFG: true}
+	if rest >= 0 {
+		// 另一种颜色当底色：格子被填满，两种颜色之间不会有缝
+		cell.bg, cell.hasBG = cols[rest].c, true
 	}
-	return rgba(r/n, g/n, b/n)
+	return cell
 }
 
 func rgba(r, g, b float64) color.RGBA {
