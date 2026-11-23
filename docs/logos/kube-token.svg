@@ -1,31 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-labelledby="kube-token-title">
   <title id="kube-token-title">kube-token</title>
   <!--
-    招牌：一个六边形壳子，中间一颗实心核心（容器 / k8s）。
-    这不是随手画的矢量图，是照着终端里的取样网格一比一摆的像素画：画布 24 个单位宽、
-    24 个单位高，一个像素块 1 单位宽、2 单位高（终端里半个字符宽、一个字符高），
-    所以每个 rect 都会正好落进一个像素，渲染出来没有毛边，也不会被阈值吃掉细节。
+    招牌：一个六边形壳子，中间一颗亮出来的核心（容器 / k8s）。
+    这不是随手画的矢量图，是照着终端里的字符格一比一摆的像素画：
+    画布 24 单位宽、24 单位高，一个字符格（2×2 个方块像素）是 2 单位宽、
+    4 单位高，所以每个 rect 都正好填满整格，斜边是一级级整格台阶，
+    不会出现半格相错的毛边。
   -->
-  <rect x="6" y="0" width="12" height="2" fill="#326CE5"/>
-  <rect x="6" y="2" width="12" height="2" fill="#326CE5"/>
-  <rect x="4" y="4" width="4" height="2" fill="#326CE5"/>
-  <rect x="16" y="4" width="4" height="2" fill="#326CE5"/>
-  <rect x="2" y="6" width="4" height="2" fill="#326CE5"/>
-  <rect x="18" y="6" width="4" height="2" fill="#326CE5"/>
-  <rect x="0" y="8" width="4" height="2" fill="#326CE5"/>
-  <rect x="20" y="8" width="4" height="2" fill="#326CE5"/>
-  <rect x="0" y="10" width="4" height="2" fill="#326CE5"/>
-  <rect x="10" y="10" width="4" height="2" fill="#326CE5"/>
-  <rect x="20" y="10" width="4" height="2" fill="#326CE5"/>
-  <rect x="0" y="12" width="4" height="2" fill="#326CE5"/>
-  <rect x="10" y="12" width="4" height="2" fill="#326CE5"/>
-  <rect x="20" y="12" width="4" height="2" fill="#326CE5"/>
-  <rect x="0" y="14" width="4" height="2" fill="#326CE5"/>
-  <rect x="20" y="14" width="4" height="2" fill="#326CE5"/>
-  <rect x="2" y="16" width="4" height="2" fill="#326CE5"/>
-  <rect x="18" y="16" width="4" height="2" fill="#326CE5"/>
-  <rect x="4" y="18" width="4" height="2" fill="#326CE5"/>
-  <rect x="16" y="18" width="4" height="2" fill="#326CE5"/>
-  <rect x="6" y="20" width="12" height="2" fill="#326CE5"/>
-  <rect x="6" y="22" width="12" height="2" fill="#326CE5"/>
+  <rect x="6" y="0" width="12" height="4" fill="#326CE5"/>
+  <rect x="4" y="4" width="4" height="4" fill="#326CE5"/>
+  <rect x="16" y="4" width="4" height="4" fill="#326CE5"/>
+  <rect x="2" y="8" width="4" height="4" fill="#326CE5"/>
+  <rect x="18" y="8" width="4" height="4" fill="#326CE5"/>
+  <rect x="2" y="12" width="4" height="4" fill="#326CE5"/>
+  <rect x="18" y="12" width="4" height="4" fill="#326CE5"/>
+  <rect x="4" y="16" width="4" height="4" fill="#326CE5"/>
+  <rect x="16" y="16" width="4" height="4" fill="#326CE5"/>
+  <rect x="6" y="20" width="12" height="4" fill="#326CE5"/>
+  <rect x="8" y="8" width="8" height="8" fill="#60A5FA"/>
 </svg>

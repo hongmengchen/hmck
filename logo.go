@@ -73,29 +73,96 @@ func svgLogo(key string) []string {
 	return styleLogoCells(logoCells(pix))
 }
 
-// markLogo 是没有 SVG 时的退路：方框里放首字母。
-// 中文等宽字符会撑破方框，只有 ASCII 字母数字才放进去
+// markLogo 是没有 SVG 时的退路：把工具名的首字母画成和招牌一样大的 6×12 方块字。
+// 中文等宽字符画不出来，退成问号；颜色用中性的石板灰，认的是字母不是品牌色
 func markLogo(t tool) []string {
-	if mark, ok := toolMarks[strings.ToLower(t.Key)]; ok {
-		return styleMark(mark)
-	}
-	ch := "*"
-	key := strings.TrimSpace(t.Key)
-	if key != "" {
-		r := []rune(strings.ToUpper(key))[0]
-		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			ch = string(r)
-		}
-	}
-	return styleMark([]string{"┌───┐", "│ " + ch + " │", "└───┘"})
+	return styleLogoCells(letterCells(markLetter(t)))
 }
 
-func styleMark(lines []string) []string {
-	out := make([]string, len(lines))
-	for i, l := range lines {
-		out[i] = styles.Accent.Render(l)
+// markLetter 取招牌上那个字：工具名首字母转大写，画不出来就用问号
+func markLetter(t tool) rune {
+	key := strings.TrimSpace(t.Key)
+	if key == "" {
+		return '?'
 	}
-	return out
+	r := []rune(strings.ToUpper(key))[0]
+	if _, ok := glyph4x5[r]; ok {
+		return r
+	}
+	return '?'
+}
+
+// 自定义工具没有品牌色，用石板灰；深浅两种终端都看得清
+var markInk = color.RGBA{R: 0x94, G: 0xA3, B: 0xB8, A: 0xff}
+
+// letterCells 把 4×5 的点阵字放大 2 倍摆到 24×12 的像素网格上。
+// 每个字形像素占 2×2 个格子像素，起点必须落在偶数格上，否则一行字会
+// 横跨两个字符行，画出来是半格相错的虚线；5 行字形占不满 6 个字符行，
+// 空出来的一行放在底下，上面顶格看着更稳
+func letterCells(ch rune) [][]logoCell {
+	glyph, ok := glyph4x5[ch]
+	if !ok {
+		glyph = glyph4x5['?']
+	}
+	const scale, x0, y0 = 2, 8, 0
+	pix := make([]logoDot, logoDots*logoRowsN*2)
+	for gy, line := range glyph {
+		for gx, c := range line {
+			if c != '#' {
+				continue
+			}
+			for dy := 0; dy < scale; dy++ {
+				for dx := 0; dx < scale; dx++ {
+					x := x0 + gx*scale + dx
+					y := y0 + gy*scale + dy
+					pix[y*logoDots+x] = logoDot{r: chanR(markInk), g: chanG(markInk), b: chanB(markInk), a: 1}
+				}
+			}
+		}
+	}
+	return logoCells(pix)
+}
+
+// glyph4x5 是 4×5 的点阵字，只收 A-Z、0-9 和一个问号。
+// 3 格宽时 M 和 H、W 和 N 几乎分不出来，宽一格就都认得出了
+var glyph4x5 = map[rune][5]string{
+	'A': {".##.", "#..#", "####", "#..#", "#..#"},
+	'B': {"###.", "#..#", "###.", "#..#", "###."},
+	'C': {".###", "#...", "#...", "#...", ".###"},
+	'D': {"###.", "#..#", "#..#", "#..#", "###."},
+	'E': {"####", "#...", "###.", "#...", "####"},
+	'F': {"####", "#...", "###.", "#...", "#..."},
+	'G': {".###", "#...", "#.##", "#..#", ".###"},
+	'H': {"#..#", "#..#", "####", "#..#", "#..#"},
+	'I': {"###.", ".#..", ".#..", ".#..", "###."},
+	'J': {"..##", "...#", "...#", "#..#", ".##."},
+	'K': {"#..#", "#.#.", "##..", "#.#.", "#..#"},
+	'L': {"#...", "#...", "#...", "#...", "####"},
+	'M': {"#..#", "####", "####", "#..#", "#..#"},
+	'N': {"#..#", "##.#", "#.##", "#..#", "#..#"},
+	'O': {".##.", "#..#", "#..#", "#..#", ".##."},
+	'P': {"###.", "#..#", "###.", "#...", "#..."},
+	'Q': {".##.", "#..#", "#..#", "#.##", ".##."},
+	'R': {"###.", "#..#", "###.", "#.#.", "#..#"},
+	'S': {".###", "#...", ".##.", "...#", "###."},
+	'T': {"####", ".#..", ".#..", ".#..", ".#.."},
+	'U': {"#..#", "#..#", "#..#", "#..#", ".##."},
+	'V': {"#..#", "#..#", "#..#", ".##.", ".#.."},
+	'W': {"#..#", "#..#", "####", "####", "#..#"},
+	'X': {"#..#", "#..#", ".##.", "#..#", "#..#"},
+	'Y': {"#..#", "#..#", ".##.", ".#..", ".#.."},
+	'Z': {"####", "...#", ".##.", "#...", "####"},
+	'0': {".##.", "#..#", "#..#", "#..#", ".##."},
+	'1': {".#..", "##..", ".#..", ".#..", "###."},
+	'2': {".##.", "#..#", "..#.", ".#..", "####"},
+	'3': {"###.", "...#", ".##.", "...#", "###."},
+	'4': {"#..#", "#..#", "####", "...#", "...#"},
+	'5': {"####", "#...", "###.", "...#", "###."},
+	'6': {".##.", "#...", "###.", "#..#", ".##."},
+	'7': {"####", "...#", "..#.", ".#..", ".#.."},
+	'8': {".##.", "#..#", ".##.", "#..#", ".##."},
+	'9': {".##.", "#..#", ".###", "...#", ".##."},
+	'?': {".##.", "#..#", "..#.", "....", ".#.."},
 }
 
 // ---------- SVG：只认这套招牌用得着的子集 ----------
@@ -713,8 +780,15 @@ func rasterizeLogoRect(img *logoImage, nx, ny int) []logoDot {
 	if side <= 0 {
 		return nil
 	}
-	minX -= (side - (maxX - minX)) / 2
-	minY -= (side - (maxY - minY)) / 2
+	// 24×24 的画布是照着取样网格一比一摆的像素画：直接映射整个画布，
+	// 不裁不缩，每个 rect 正好是一个色块。裁内容的话，画不满整幅的字标
+	// （比如 kubectl 的 K8S）会被拉伸，边缘就落到半个像素上
+	if img.w == logoDots && img.h == logoDots {
+		minX, minY, side = img.minX, img.minY, img.w
+	} else {
+		minX -= (side - (maxX - minX)) / 2
+		minY -= (side - (maxY - minY)) / 2
+	}
 
 	// 描边最细只到「一个矮的那个方向的像素」，再细也会被取样吞掉
 	scale := float64(min(nx, ny)) / side
@@ -951,6 +1025,12 @@ func makeQuadCell(q [2][2]logoDot) logoCell {
 				mask |= 1 << (j*2 + i)
 			}
 		}
+	}
+	// 整格都是同一种墨色：别用 █，改用底色空格。
+	// Windows 上的字体行距会把 █ 切成一条条横缝，整块实心就花了；
+	// 底色空格填满整个字符格，和上下行严丝合缝
+	if mask == 0b1111 && len(cols) == 1 {
+		return logoCell{ch: ' ', bg: cols[ink].c, hasBG: true}
 	}
 	cell := logoCell{ch: quadRunes[mask], fg: cols[ink].c, hasFG: true}
 	if rest >= 0 {

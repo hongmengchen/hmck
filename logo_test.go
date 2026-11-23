@@ -3,39 +3,69 @@ package main
 import (
 	"image/color"
 	"math"
-	"strings"
 	"testing"
 )
 
-// 每个内置工具的招牌都由 docs/logos 里的 SVG 渲染出来：logoWidth 格宽、logoRowsN 行高，一幅图一个样
+// 每个内置工具的招牌都由 docs/logos 里的 SVG 渲染出来：
+// logoWidth 格宽、logoRowsN 行高，每一行都有笔画，一幅图一个样
 func TestBuiltinLogosRenderFromSVG(t *testing.T) {
-	seen := map[string]string{}
-	for _, key := range []string{"hmck", "kube-token", "npm-token", "glab"} {
-		rows := toolLogo(tool{Key: key})
+	seen := map[string][]logoCell{}
+	for _, key := range []string{"hmck", "kube-token", "npm-token", "glab", "kubectl"} {
+		raw, err := logoSVGs.ReadFile("docs/logos/" + key + ".svg")
+		if err != nil {
+			t.Fatalf("%s 没有 SVG: %v", key, err)
+		}
+		img, err := parseSVG(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", key, err)
+		}
+		rows := logoCells(rasterizeLogo(img))
 		if len(rows) != logoRowsN {
 			t.Fatalf("%s 的招牌应有 %d 行，got %d", key, logoRowsN, len(rows))
 		}
+		var all []logoCell
+		inkedRows := 0
 		for i, row := range rows {
-			plain := plainText(row)
-			if n := len([]rune(plain)); n != logoWidth {
-				t.Errorf("%s 第 %d 行应有 %d 格，got %d: %q", key, i, logoWidth, n, plain)
+			if len(row) != logoWidth {
+				t.Fatalf("%s 第 %d 行应有 %d 格，got %d", key, i, logoWidth, len(row))
 			}
-			if !hasInk(plain) {
-				t.Errorf("%s 第 %d 行没有实心像素: %q", key, i, plain)
-			}
-			for _, r := range plain {
-				if !isQuadRune(r) {
-					t.Errorf("%s 第 %d 行有不是方块字符的字: %q", key, i, r)
-					break
+			inked := false
+			for _, c := range row {
+				if c.hasFG || c.hasBG {
+					inked = true
+				}
+				if c.hasFG && !isQuadRune(c.ch) {
+					t.Errorf("%s 第 %d 行有不是方块字符的字: %q", key, i, c.ch)
 				}
 			}
+			if inked {
+				inkedRows++
+			}
+			all = append(all, row...)
 		}
-		full := plainText(strings.Join(rows, "\n"))
-		if other, ok := seen[full]; ok {
-			t.Errorf("%s 和 %s 的招牌一模一样", key, other)
+		// 字标只有 5 行高，留一行白边是对的；再多就是画丢了
+		if inkedRows < logoRowsN-1 {
+			t.Errorf("%s 只有 %d 行有笔画", key, inkedRows)
 		}
-		seen[full] = key
+		for other, cells := range seen {
+			if sameCells(cells, all) {
+				t.Errorf("%s 和 %s 的招牌一模一样", key, other)
+			}
+		}
+		seen[key] = all
 	}
+}
+
+func sameCells(a, b []logoCell) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // 招牌用的是 SVG 里的真颜色：hmck 的箭头是绿色的，glab 的狸猫是橙红的
@@ -59,7 +89,8 @@ func TestLogoKeepsSVGColors(t *testing.T) {
 		}
 		found := false
 		for _, cell := range flatCells(logoCells(rasterizeLogo(img))) {
-			if cell.hasFG && c.match(cell.fg) {
+			// 整格同色时颜色在底色上，半格时在前景上，两种都算
+			if (cell.hasFG && c.match(cell.fg)) || (cell.hasBG && c.match(cell.bg)) {
 				found = true
 			}
 		}
@@ -69,13 +100,54 @@ func TestLogoKeepsSVGColors(t *testing.T) {
 	}
 }
 
-// 自定义工具没有 SVG，退回方框：非 ASCII 首字母不该塞进去（会撑破方框）
+// 自定义工具没有 SVG，退回和内置招牌同样大的首字母方块字：6 行、12 格宽，占满同一块地方
 func TestLogoFallsBackToMark(t *testing.T) {
-	if got := plainText(strings.Join(toolLogo(tool{Key: "中文工具"}), "")); !strings.Contains(got, "│ * │") {
-		t.Errorf("自定义工具应该用方框招牌，got %q", got)
+	for _, key := range []string{"my-tool", "中文工具"} {
+		rows := toolLogo(tool{Key: key})
+		if len(rows) != logoRowsN {
+			t.Fatalf("%s 的招牌应有 %d 行，got %d", key, logoRowsN, len(rows))
+		}
+		for i, row := range rows {
+			plain := plainText(row)
+			if n := len([]rune(plain)); n != logoWidth {
+				t.Errorf("%s 第 %d 行应有 %d 格，got %d", key, i, logoWidth, n)
+			}
+			for _, r := range plain {
+				if !isQuadRune(r) {
+					t.Errorf("%s 第 %d 行有不是方块字符的字: %q", key, i, r)
+					break
+				}
+			}
+		}
 	}
-	if got := plainText(strings.Join(toolLogo(tool{Key: "my-tool"}), "")); !strings.Contains(got, "│ M │") {
-		t.Errorf("自定义工具应该用首字母，got %q", got)
+	// 实心字格画的是底色空格，plain 出来都是空白，得比字符格本身
+	if sameCells(flatCells(letterCells(markLetter(tool{Key: "my-tool"}))),
+		flatCells(letterCells(markLetter(tool{Key: "中文工具"})))) {
+		t.Error("M 和问号的招牌不该一模一样")
+	}
+	if got := markLetter(tool{Key: "my-tool"}); got != 'M' {
+		t.Errorf("my-tool 应该取首字母 M，got %c", got)
+	}
+	if got := markLetter(tool{Key: "中文工具"}); got != '?' {
+		t.Errorf("画不出来的首字母应该退成问号，got %c", got)
+	}
+}
+
+// 整格同色的地方用底色空格，不用 █：Windows 的行距会把 █ 切成横缝
+func TestSolidCellsUseBackground(t *testing.T) {
+	ink := logoDot{r: 1, a: 1}
+	var q [2][2]logoDot
+	for j := 0; j < 2; j++ {
+		for i := 0; i < 2; i++ {
+			q[j][i] = ink
+		}
+	}
+	cell := makeQuadCell(q)
+	if cell.hasFG {
+		t.Error("整格同色不该再画字形")
+	}
+	if !cell.hasBG || cell.ch != ' ' {
+		t.Errorf("整格同色应该是底色空格，got %+v", cell)
 	}
 }
 

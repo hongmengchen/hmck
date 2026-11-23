@@ -130,16 +130,6 @@ var registry = []tool{
 	},
 }
 
-// toolMarks 是 SVG 画不出来时的退路：三行、五格宽的手画方框。
-// 平时用的招牌在 logo.go 里，由各自仓库的 docs/logos/*.svg 渲染出来
-var toolMarks = map[string][]string{
-	"hmck":       {"╭───╮", "│ ↑ │", "╰───╯"},
-	"kube-token": {"╱───╲", "│ K │", "╲───╱"},
-	"npm-token":  {"┌───┐", "│ N │", "└───┘"},
-	"glab":       {"╱╲_╱╲", "│ G │", "╲___╱"},
-	"kubectl":    {"═╤═╤═", "─( )─", "═╧═╧═"},
-}
-
 // allTools 是内置 + 本机配置里的自定义工具；key 冲突时内置优先
 func allTools() ([]tool, error) {
 	out := append([]tool(nil), registry...)

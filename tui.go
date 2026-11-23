@@ -47,6 +47,7 @@ const (
 	notes
 	infoPage
 	confirmUninstall
+	addTool
 )
 
 type resultLine struct {
@@ -93,6 +94,43 @@ type tuiModel struct {
 
 	confirm      uninstallView // 正在确认卸载哪个工具
 	exitOnResult bool          // 卸载了 hmck 自己：结果页按任意键退出
+
+	add addView // 正在填「新增工具」的表单
+}
+
+// addView 是新增工具的表单：仓库必填，名字和说明可以不填。
+// 作用和三件事的 CLI 版 `hmck add <repo>` 一样，只是添加完顺手装好
+type addView struct {
+	repo, key, desc string
+	field           int // 0 仓库，1 名字，2 说明
+	err             string
+}
+
+// value 是当前这一格的值；输入、退格都写这里
+func (a *addView) value() *string {
+	switch a.field {
+	case 1:
+		return &a.key
+	case 2:
+		return &a.desc
+	}
+	return &a.repo
+}
+
+// maxAddField 是单格的字符上限：仓库地址再长也到不了这么长，挡一下粘贴进来的大段文字
+const maxAddField = 120
+
+func (a *addView) insert(s string) {
+	v := a.value()
+	if r := []rune(*v); len(r) < maxAddField {
+		*v = string(append(r, []rune(s)...))
+	}
+}
+
+func (a *addView) backspace() {
+	if r := []rune(*a.value()); len(r) > 0 {
+		*a.value() = string(r[:len(r)-1])
+	}
 }
 
 // uninstallView 是卸载确认页的状态：带上整个 toolState，
@@ -360,6 +398,39 @@ func progressReporter(ch chan tea.Msg, gen, index, total int) progressFunc {
 	}
 }
 
+// addToolMsg 是「新增工具」跑完的结果：读到了发布就顺手把平台和校验方式记准
+type addToolMsg struct {
+	t   tool
+	err error
+}
+
+// addToolCmd 和三件事的 `hmck add` 走同一套：先看发布里的资产推平台，
+// 读不到就按常见平台记，写进本机配置，随后由调用方接着装
+func addToolCmd(t tool) tea.Cmd {
+	return func() tea.Msg {
+		info, err := fetchReleaseInfo(t.Repo)
+		if err != nil {
+			t.Platforms = append([]string(nil), defaultPlatforms...)
+		} else {
+			t.Platforms = inferPlatforms(t.Key, info.Assets)
+			if len(t.Platforms) == 0 {
+				t.Platforms = append([]string(nil), defaultPlatforms...)
+			}
+			if hasChecksums(info.Assets) {
+				t.Checksums = true
+			}
+		}
+		if _, err := addCustomTool(t, false); err != nil {
+			return addToolMsg{err: err}
+		}
+		t.Custom = true
+		if err := normalizeCustom(&t); err != nil {
+			return addToolMsg{err: err}
+		}
+		return addToolMsg{t: t}
+	}
+}
+
 func uninstallCmd(t tool, keepSkill bool) tea.Cmd {
 	return func() tea.Msg {
 		return uninstallDoneMsg{res: uninstallTool(t, keepSkill)}
@@ -570,6 +641,20 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.note.entries = msg.entries
 		}
 
+	case addToolMsg:
+		if msg.err != nil {
+			// 没写进配置：回到表单，把填过的留着，改一下再来
+			m.state = addTool
+			m.add.err = msg.err.Error()
+			return m, nil
+		}
+		st := toolState{Tool: msg.t}
+		m.states = append(m.states, st)
+		m.cursor = len(m.states) - 1
+		m.add = addView{}
+		// 加进来就是为了用：接着装，不用再按一次 enter
+		return m.startInstall(st)
+
 	case uninstallDoneMsg:
 		m.state = result
 		m.resultLines = msg.res.lines()
@@ -722,6 +807,10 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = working
 			m.workText = "正在安装 agent skill…"
 			return m, tea.Batch(m.spin.Tick, skillCmd())
+		case "n":
+			m.state = addTool
+			m.add = addView{}
+			return m, nil
 		case "r":
 			return m.refresh()
 		case "q", "esc":
@@ -771,6 +860,34 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.confirm.typed += string(k.Runes)
 			}
 			m.confirm.err = ""
+			return m, nil
+		}
+		return m, nil
+
+	case addTool:
+		// 和卸载确认页一样，q 之类的键要能打进输入框，退出只认 ctrl+c
+		switch {
+		case k.String() == "ctrl+c":
+			return m, tea.Quit
+		case k.String() == "esc":
+			m.state = list
+			m.add = addView{}
+			return m, nil
+		case k.String() == "tab", k.String() == "down":
+			m.add.field = (m.add.field + 1) % 3
+			return m, nil
+		case k.String() == "shift+tab", k.String() == "up":
+			m.add.field = (m.add.field + 2) % 3
+			return m, nil
+		case k.String() == "enter":
+			return m.submitAdd()
+		case k.String() == "backspace":
+			m.add.backspace()
+			m.add.err = ""
+			return m, nil
+		case k.Type == tea.KeyRunes:
+			m.add.insert(string(k.Runes))
+			m.add.err = ""
 			return m, nil
 		}
 		return m, nil
@@ -868,6 +985,44 @@ func (m tuiModel) animating() bool {
 		return !m.localReady || len(m.pending) > 0 // 信息页上「读取中」的圈也得转
 	}
 	return m.state == list && (!m.localReady || len(m.pending) > 0)
+}
+
+// submitAdd 收起新增表单：和 `hmck add <repo>` 走同一条路——先落进本机配置，
+// 再去读发布信息补平台，读到了就直接接着装
+func (m tuiModel) submitAdd() (tea.Model, tea.Cmd) {
+	a := &m.add
+	a.err = ""
+	repo, err := parseRepo(a.repo)
+	if err != nil {
+		a.err = err.Error()
+		a.field = 0
+		return m, nil
+	}
+	t := tool{Repo: repo, Desc: a.desc, Custom: true}
+	t.Key = strings.TrimSpace(a.key)
+	if t.Key == "" {
+		t.Key = defaultKeyForRepo(repo)
+	}
+	if isBuiltin(t.Key) {
+		a.err = t.Key + " 是内置工具，换个 key 再加"
+		a.field = 1
+		return m, nil
+	}
+	for _, st := range m.states {
+		if strings.EqualFold(st.Tool.Key, t.Key) {
+			a.err = t.Key + " 已经在列表里了"
+			a.field = 1
+			return m, nil
+		}
+	}
+	if err := normalizeCustom(&t); err != nil {
+		a.err = err.Error()
+		return m, nil
+	}
+	t.Custom = true
+	m.state = working
+	m.workText = "正在读取 " + repo + " 的发布信息…"
+	return m, tea.Batch(m.spin.Tick, addToolCmd(t))
 }
 
 func (m tuiModel) startInstall(st toolState) (tea.Model, tea.Cmd) {
@@ -1089,6 +1244,8 @@ func (m tuiModel) View() string {
 		body = m.viewInfo()
 	case confirmUninstall:
 		body = m.viewConfirm()
+	case addTool:
+		body = m.viewAdd()
 	}
 	return "\n" + body + "\n"
 }
@@ -1161,7 +1318,7 @@ func (m tuiModel) viewList() string {
 		}
 	}
 	b.WriteString("\n")
-	b.WriteString(m.viewHints("↑↓", "选择", "enter", "启动/安装", "u", "升级", "U", "全部更新",
+	b.WriteString(m.viewHints("↑↓", "选择", "enter", "启动/安装", "n", "新工具", "u", "升级", "U", "全部更新",
 		"i", "信息", "g", "更新日志", "d", "卸载", "s", "装 skill", "r", "重新检查", "q", "退出"))
 	return b.String()
 }
@@ -1632,6 +1789,54 @@ func (m tuiModel) viewConfirm() string {
 
 	b.WriteString("\n")
 	b.WriteString(m.viewHints("enter", "确认卸载", "esc", "算了", "ctrl+c", "退出"))
+	return b.String()
+}
+
+// viewAdd 是新增工具页：填一个仓库就够，key 和说明可以留空。
+// 资产名得是 <key>_<os>_<arch>，不然推不出该下哪个平台的包
+func (m tuiModel) viewAdd() string {
+	w := m.contentWidth()
+	var b strings.Builder
+	b.WriteString(m.withLogo(
+		styles.Title.Render("新增工具")+styles.Dim.Render("  加一个让 hmck 管的"),
+		styles.Dim.Render("填 GitHub 仓库就能装：owner/name 或直接贴链接"),
+		styles.Dim.Render("key 不填就按仓库名取，资产名写成 <key>_<os>_<arch>"),
+	))
+	b.WriteString("\n")
+
+	fields := []struct {
+		label string
+		hint  string
+		value string
+	}{
+		{"仓库", "owner/name，也可以直接贴 GitHub 链接", m.add.repo},
+		{"key", "不填就按仓库名取", m.add.key},
+		{"说明", "列表里那句一句话说明，可以留空", m.add.desc},
+	}
+	for i, f := range fields {
+		active := i == m.add.field
+		labelStyle := styles.Dim
+		if active {
+			labelStyle = styles.Accent
+		}
+		label := "  " + labelStyle.Render(theme.Pad(f.label, 4)) + "  "
+		v := theme.Truncate(f.value, max(w-12, 8))
+		switch {
+		case active:
+			b.WriteString(label + styles.Accent.Render("> ") + v + styles.Accent.Render("█"))
+		case v == "":
+			b.WriteString(label + styles.Dim.Render(theme.Truncate(f.hint, max(w-12, 8))))
+		default:
+			b.WriteString(label + v)
+		}
+		b.WriteString("\n")
+	}
+	if m.add.err != "" {
+		b.WriteString("\n  " + styles.Bad.Render(theme.Truncate(m.add.err, max(w-2, 8))) + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(m.viewHints("tab", "换一格", "enter", "添加并安装", "esc", "取消", "ctrl+c", "退出"))
 	return b.String()
 }
 

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-labelledby="kubectl-title">
+  <title id="kubectl-title">kubectl</title>
+  <!--
+    招牌：K8S 字标，一眼看出这是连集群的命令行。
+    这不是随手画的矢量图，是照着终端里的字符格一比一摆的像素画：
+    画布 24 单位宽、24 单位高，一个字符格（2×2 个方块像素）是 2 单位宽、
+    4 单位高，每个 rect 正好填满整格，笔画是整格对齐的方块字。
+  -->
+  <rect x="0" y="0" width="2" height="4" fill="#38BDF8"/>
+  <rect x="4" y="0" width="2" height="4" fill="#38BDF8"/>
+  <rect x="0" y="4" width="2" height="4" fill="#38BDF8"/>
+  <rect x="4" y="4" width="2" height="4" fill="#38BDF8"/>
+  <rect x="0" y="8" width="4" height="4" fill="#38BDF8"/>
+  <rect x="0" y="12" width="2" height="4" fill="#38BDF8"/>
+  <rect x="4" y="12" width="2" height="4" fill="#38BDF8"/>
+  <rect x="0" y="16" width="2" height="4" fill="#38BDF8"/>
+  <rect x="4" y="16" width="2" height="4" fill="#38BDF8"/>
+  <rect x="8" y="0" width="6" height="4" fill="#38BDF8"/>
+  <rect x="8" y="4" width="2" height="4" fill="#38BDF8"/>
+  <rect x="12" y="4" width="2" height="4" fill="#38BDF8"/>
+  <rect x="8" y="8" width="6" height="4" fill="#38BDF8"/>
+  <rect x="8" y="12" width="2" height="4" fill="#38BDF8"/>
+  <rect x="12" y="12" width="2" height="4" fill="#38BDF8"/>
+  <rect x="8" y="16" width="6" height="4" fill="#38BDF8"/>
+  <rect x="16" y="0" width="6" height="4" fill="#38BDF8"/>
+  <rect x="16" y="4" width="2" height="4" fill="#38BDF8"/>
+  <rect x="16" y="8" width="6" height="4" fill="#38BDF8"/>
+  <rect x="20" y="12" width="2" height="4" fill="#38BDF8"/>
+  <rect x="16" y="16" width="6" height="4" fill="#38BDF8"/>
+</svg>

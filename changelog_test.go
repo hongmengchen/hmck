@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 const sampleChangelog = `# 变更记录
@@ -199,6 +201,15 @@ func TestFormatChangelogText(t *testing.T) {
 // 列表里每个工具左边都有自己的招牌
 func TestListViewShowsToolLogos(t *testing.T) {
 	isolateConfig(t)
+	// 现在的招牌整格都是底色空格，plainText 里全是空白；打开颜色，按带样式的行来找
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	resetLogoCache()
+	t.Cleanup(func() {
+		lipgloss.SetColorProfile(oldProfile)
+		resetLogoCache()
+	})
+
 	m := newTUIModel()
 	m.width, m.height = 110, 40
 	m.localReady = true
@@ -211,15 +222,14 @@ func TestListViewShowsToolLogos(t *testing.T) {
 		{Tool: tool{Key: "my-tool", Repo: "me/my-tool", Desc: "自定义"}, Path: "/tmp/my-tool", Installed: "1.0.0", Latest: "1.0.0"},
 	}
 
-	got := plainText(m.viewList())
-	for _, key := range []string{"kube-token", "npm-token", "hmck"} {
-		logo := toolLogo(tool{Key: key})
-		if len(logo) == 0 || !strings.Contains(got, plainText(logo[0])) {
-			t.Errorf("列表里缺少 %s 的招牌:\n%s", key, got)
+	got := m.viewList()
+	for _, key := range []string{"kube-token", "npm-token", "hmck", "my-tool"} {
+		if row := toolLogo(tool{Key: key})[0]; !strings.Contains(got, row) {
+			t.Errorf("列表里缺少 %s 的招牌:%q", key, row)
 		}
 	}
-	if got := plainText(strings.Join(toolLogo(tool{Key: "中文工具"}), "")); !strings.Contains(got, "│ * │") {
-		t.Errorf("自定义工具的非 ASCII 首字母不该塞进方框: %q", got)
+	if markLetter(tool{Key: "中文工具"}) != '?' {
+		t.Error("中文工具名应该退成问号招牌")
 	}
 }
 
