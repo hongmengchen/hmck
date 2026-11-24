@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -33,12 +35,13 @@ type ghClient struct {
 // ghToken 从 gh CLI 拿用户的 GitHub token。gh 没装或没登录时给出能照着做的提示，
 // 不打印 token，也不把它写进任何文件。
 func ghToken() (string, error) {
-	if _, err := exec.LookPath("gh"); err != nil {
-		return "", errors.New("没找到 gh。先装 GitHub CLI，再运行 gh auth login")
+	path, ok := ghPath()
+	if !ok {
+		return "", errors.New("没找到 gh。先装 GitHub CLI（hmck 的 TUI 同步页里可以直接装），再运行 gh auth login")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output()
+	out, err := exec.CommandContext(ctx, path, "auth", "token").Output()
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", errors.New("gh auth token 超时；检查网络后重试")
@@ -54,6 +57,156 @@ func ghToken() (string, error) {
 
 // syncGHToken 留成变量，测试里换成假 token，不去碰真实的 gh
 var syncGHToken = ghToken
+
+// ghDownloadURL 是没找到包管理器时给用户打开的 GitHub CLI 官方下载页
+const ghDownloadURL = "https://cli.github.com/"
+
+// ghFallbackPaths 是 gh 的常见安装位置。Windows 上刚用 winget 装完时，
+// 当前进程的 PATH 还是旧的，光靠 LookPath 会找不到，所以直接去这些目录里看
+func ghFallbackPaths() []string {
+	var paths []string
+	switch runtime.GOOS {
+	case "windows":
+		if d := os.Getenv("ProgramFiles"); d != "" {
+			paths = append(paths, filepath.Join(d, "GitHub CLI", "gh.exe"))
+		}
+		if d := os.Getenv("ProgramFiles(x86)"); d != "" {
+			paths = append(paths, filepath.Join(d, "GitHub CLI", "gh.exe"))
+		}
+		if d := os.Getenv("LOCALAPPDATA"); d != "" {
+			paths = append(paths, filepath.Join(d, "Programs", "GitHub CLI", "gh.exe"))
+		}
+		if d := os.Getenv("USERPROFILE"); d != "" {
+			paths = append(paths, filepath.Join(d, "scoop", "shims", "gh.exe"))
+		}
+		if d := os.Getenv("ProgramData"); d != "" {
+			paths = append(paths, filepath.Join(d, "chocolatey", "bin", "gh.exe"))
+		}
+	case "darwin":
+		paths = []string{"/opt/homebrew/bin/gh", "/usr/local/bin/gh"}
+	default:
+		paths = []string{"/usr/bin/gh", "/usr/local/bin/gh", "/snap/bin/gh"}
+		if home, err := os.UserHomeDir(); err == nil {
+			paths = append(paths, filepath.Join(home, ".local", "bin", "gh"))
+		}
+	}
+	return paths
+}
+
+// ghPath 先找 PATH，再找常见安装目录
+func ghPath() (string, bool) {
+	if p, err := exec.LookPath("gh"); err == nil {
+		return p, true
+	}
+	for _, p := range ghFallbackPaths() {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// ghVersion 读 `gh --version` 里的版本号；读不到就返回空串，不影响使用
+func ghVersion(path string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) >= 3 && fields[1] == "version" {
+		return fields[2]
+	}
+	return ""
+}
+
+// ghStatus 是同步页要知道的两件事：装没装、登录没登录
+type ghStatus struct {
+	Found    bool
+	Path     string
+	Version  string
+	LoggedIn bool
+}
+
+// inspectGH 看一眼本机的 gh：找得到就顺便试一下能不能拿到 token（只看成败，不留 token）
+func inspectGH() ghStatus {
+	path, ok := ghPath()
+	if !ok {
+		return ghStatus{}
+	}
+	st := ghStatus{Found: true, Path: path, Version: ghVersion(path)}
+	if token, err := syncGHToken(); err == nil && token != "" {
+		st.LoggedIn = true
+	}
+	return st
+}
+
+// ghInstallPlan 是「安装 GitHub CLI」这一步跑什么：有包管理器就直接装，
+// 没有就把 cmd 留空，让页面改成打开官方下载页
+type ghInstallPlan struct {
+	label string
+	desc  string
+	cmd   *exec.Cmd
+}
+
+// ghInstaller 留成变量，测试里换成不真的装东西的命令
+var ghInstaller = planGHInstall
+
+// planGHInstall 按平台挑一个现成的包管理器；sudo 用来装系统包，
+// tea.ExecProcess 会把终端交回去，密码提示能正常显示
+func planGHInstall() ghInstallPlan {
+	switch runtime.GOOS {
+	case "windows":
+		if _, err := exec.LookPath("winget"); err == nil {
+			return ghInstallPlan{"安装 GitHub CLI", "用 winget 装，装完回来自动接着登录",
+				exec.Command("winget", "install", "--id", "GitHub.cli", "--exact",
+					"--source", "winget", "--accept-package-agreements", "--accept-source-agreements")}
+		}
+		if _, err := exec.LookPath("scoop"); err == nil {
+			return ghInstallPlan{"安装 GitHub CLI", "用 scoop 装，装完回来自动接着登录",
+				exec.Command("scoop", "install", "gh")}
+		}
+		if _, err := exec.LookPath("choco"); err == nil {
+			return ghInstallPlan{"安装 GitHub CLI", "用 choco 装，装完回来自动接着登录",
+				exec.Command("choco", "install", "gh", "-y")}
+		}
+	case "darwin":
+		if _, err := exec.LookPath("brew"); err == nil {
+			return ghInstallPlan{"安装 GitHub CLI", "用 Homebrew 装，装完回来自动接着登录",
+				exec.Command("brew", "install", "gh")}
+		}
+	default:
+		switch {
+		case hasCmd("apt-get"):
+			return ghInstallPlan{"安装 GitHub CLI", "用 apt 装（会要 sudo 密码）",
+				exec.Command("sudo", "apt-get", "install", "-y", "gh")}
+		case hasCmd("dnf"):
+			return ghInstallPlan{"安装 GitHub CLI", "用 dnf 装（会要 sudo 密码）",
+				exec.Command("sudo", "dnf", "install", "-y", "gh")}
+		case hasCmd("pacman"):
+			return ghInstallPlan{"安装 GitHub CLI", "用 pacman 装（会要 sudo 密码）",
+				exec.Command("sudo", "pacman", "-S", "--noconfirm", "github-cli")}
+		}
+	}
+	return ghInstallPlan{"打开 GitHub CLI 下载页", "没找到能自动安装的包管理器；装好后按 r 重新检测", nil}
+}
+
+func hasCmd(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+// openURLCommand 用系统默认浏览器打开一个网址
+func openURLCommand(rawURL string) *exec.Cmd {
+	switch runtime.GOOS {
+	case "windows":
+		return exec.Command("cmd", "/c", "start", "", rawURL)
+	case "darwin":
+		return exec.Command("open", rawURL)
+	}
+	return exec.Command("xdg-open", rawURL)
+}
 
 func newGHClient() (*ghClient, error) {
 	token, err := syncGHToken()

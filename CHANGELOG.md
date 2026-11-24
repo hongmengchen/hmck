@@ -2,6 +2,17 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.10.10] - 2026-11-24
+
+### 新增
+
+- 同步页先看本机的 GitHub CLI：没装或没登录时最前面多出「安装 GitHub CLI」「登录 GitHub CLI」。安装按平台用 winget / scoop / choco / Homebrew / apt / dnf / pacman，找不到包管理器就打开 cli.github.com；登录直接在页面里跑 `gh auth login`。装完/登录完自动重新检测，`r` 也能手动再查，没准备好之前推送/拉取先被拦住并说清下一步
+- gh 装在 PATH 之外也认：Windows 的 `Program Files\GitHub CLI`、scoop / choco 目录，macOS 的 Homebrew 目录都会找一遍，刚装完不用重开终端
+
+### 变更
+
+- 「没找到 gh」的提示补上安装途径，不再只让人自己想办法
+
 ## [0.10.9] - 2026-11-23
 
 ### 新增

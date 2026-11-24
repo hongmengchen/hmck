@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -191,5 +193,98 @@ func TestSyncPageAddPath(t *testing.T) {
 	}
 	if len(st.ExtraPaths) != 1 || st.ExtraPaths[0] != "home:.foo/bar" {
 		t.Errorf("同步清单 = %v", st.ExtraPaths)
+	}
+}
+
+// gh 没装时页面最上面给「安装 GitHub CLI」，选中就在这个页面里跑安装器
+func TestSyncPageMissingGHSuggestsInstall(t *testing.T) {
+	isolateConfig(t)
+	old := ghInstaller
+	ghInstaller = func() ghInstallPlan {
+		return ghInstallPlan{"安装 GitHub CLI", "用 winget 装，装完回来自动接着登录", exec.Command("hmck-test-gh-installer")}
+	}
+	defer func() { ghInstaller = old }()
+
+	m := newTUIModel()
+	m.width, m.height = 100, 40
+	m.state = syncPage
+	m.sync = syncView{ghChecked: true}
+
+	items := m.syncItems()
+	if len(items) == 0 || items[0].action != "ghsetup" {
+		t.Fatalf("gh 没装时菜单第一项应该是安装，得到 %+v", items)
+	}
+	got := plainText(m.viewSync())
+	for _, want := range []string{"安装 GitHub CLI", "没装", "r 重新检测"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("同步页里缺少 %q:\n%s", want, got)
+		}
+	}
+
+	updated, cmd := m.handleSyncKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if cmd == nil || !m.sync.busy {
+		t.Fatalf("选中安装后应该去跑安装器: cmd=%v busy=%v err=%q", cmd, m.sync.busy, m.sync.err)
+	}
+}
+
+// gh 装了没登录：菜单先给「登录 GitHub CLI」，推送这类动作先拦住
+func TestSyncPageGHCheckUpdatesMenu(t *testing.T) {
+	isolateConfig(t)
+	m := newTUIModel()
+	m.width, m.height = 100, 40
+	m.state = syncPage
+
+	updated, _ := m.Update(ghCheckMsg{found: true, loggedIn: false, version: "2.63.2"})
+	m = updated.(tuiModel)
+	if !m.sync.ghChecked || m.sync.ghLogin {
+		t.Fatalf("检测结果没记住: %+v", m.sync)
+	}
+	items := m.syncItems()
+	if items[0].action != "ghlogin" {
+		t.Fatalf("没登录时第一项应该是登录，得到 %+v", items)
+	}
+	if got := plainText(m.viewSync()); !strings.Contains(got, "2.63.2") || !strings.Contains(got, "没登录") {
+		t.Errorf("状态行没写清 gh 版本和登录状态:\n%s", got)
+	}
+
+	// 往下挪到「开始同步」，没登录时不该进密码输入
+	m.sync.cursor = 1
+	updated, _ = m.handleSyncKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if m.sync.mode == syncPass || !strings.Contains(m.sync.err, "登录") {
+		t.Fatalf("没登录时推送应该先被拦住: mode=%v err=%q", m.sync.mode, m.sync.err)
+	}
+
+	updated, _ = m.Update(ghCheckMsg{found: true, loggedIn: true, version: "2.63.2"})
+	m = updated.(tuiModel)
+	if m.syncItems()[0].action == "ghlogin" {
+		t.Error("登录后不该再显示登录项")
+	}
+	if got := plainText(m.viewSync()); !strings.Contains(got, "已登录") {
+		t.Errorf("登录后状态行没说已登录:\n%s", got)
+	}
+}
+
+// 安装器退出后重新检测：装上了就提示去登录，没装上就把退出码说出来
+func TestSyncPageInstallResult(t *testing.T) {
+	m := newTUIModel()
+	m.state = syncPage
+	m.sync = syncView{busy: true, ghRetry: "install", setupErr: errors.New("exit status 1")}
+
+	updated, cmd := m.Update(ghCheckMsg{found: true, loggedIn: false, version: "2.63.2"})
+	m = updated.(tuiModel)
+	if cmd != nil {
+		t.Errorf("检测完不该再排别的命令: %v", cmd)
+	}
+	if !strings.Contains(m.sync.msg, "登录 GitHub CLI") || m.sync.err != "" {
+		t.Fatalf("装上之后应该提示去登录: msg=%q err=%q", m.sync.msg, m.sync.err)
+	}
+
+	m.sync = syncView{busy: true, ghRetry: "install", setupErr: errors.New("exit status 1")}
+	updated, _ = m.Update(ghCheckMsg{found: false})
+	m = updated.(tuiModel)
+	if !strings.Contains(m.sync.err, "安装没成功") || !strings.Contains(m.sync.err, "exit status 1") {
+		t.Fatalf("安装失败应该带上原因: %q", m.sync.err)
 	}
 }

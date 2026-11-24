@@ -134,6 +134,13 @@ type syncView struct {
 
 	path     string // 正在输入的同步路径
 	offArmed bool   // 忘掉密钥要按两次：第一次只是提醒
+
+	ghChecked bool   // 已经问过本机的 gh 了
+	ghFound   bool   // gh 装没装
+	ghLogin   bool   // gh 登录没登录
+	ghVer     string // gh 版本号
+	ghRetry   string // 刚做过 install / login，等重新检测后好接一句提示
+	setupErr  error  // 装/登录那一步的退出错误，用来把提示说清楚
 }
 
 // catalogView 是工具目录页：线上目录里的工具 + 本机自己加的自定义工具
@@ -257,6 +264,18 @@ type syncActionMsg struct {
 	msg    string
 	err    error
 	reload bool
+}
+
+// ghCheckMsg 是同步页开工前看一眼本机 GitHub CLI 的结果
+type ghCheckMsg struct {
+	found, loggedIn bool
+	version         string
+}
+
+// ghSetupMsg 是装 gh / 登录 gh 那一步退出后的结果；how 是 install / login / page
+type ghSetupMsg struct {
+	how string
+	err error
 }
 
 type uninstallDoneMsg struct{ res uninstallResult }
@@ -594,6 +613,14 @@ func autoSyncCmd() tea.Cmd {
 	}
 }
 
+// ghCheckCmd 看一眼本机的 gh 装没装、登录没登录，结果回到同步页
+func ghCheckCmd() tea.Cmd {
+	return func() tea.Msg {
+		st := inspectGH()
+		return ghCheckMsg{found: st.Found, loggedIn: st.LoggedIn, version: st.Version}
+	}
+}
+
 // syncRunCmd 在后台跑一次同步动作。pass 由同步页输入框直接传进来，
 // 不经过终端读密码——alt screen 正开着，term.ReadPassword 会打架。
 func syncRunCmd(action, pass string) tea.Cmd {
@@ -899,6 +926,47 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.reload {
 			return m, m.reloadConfigFromDisk()
 		}
+
+	case ghCheckMsg:
+		m.sync.ghChecked = true
+		m.sync.ghFound, m.sync.ghLogin, m.sync.ghVer = msg.found, msg.loggedIn, msg.version
+		m.sync.busy = false
+		retry, setupErr := m.sync.ghRetry, m.sync.setupErr
+		m.sync.ghRetry, m.sync.setupErr = "", nil
+		switch retry {
+		case "install":
+			switch {
+			case msg.found && msg.loggedIn:
+				m.sync.err = ""
+				m.sync.msg = "gh 装好了，GitHub 也登录着，可以同步了"
+			case msg.found:
+				m.sync.err = ""
+				m.sync.msg = "gh 装好了；下一步选「登录 GitHub CLI」"
+			case setupErr != nil:
+				m.sync.err = "安装没成功（" + setupErr.Error() + "）；可以再试一次，或打开下载页手动装"
+			default:
+				m.sync.err = "装完还没找到 gh；把安装目录加进 PATH 后重开 hmck，或按 r 重新检测"
+			}
+		case "login":
+			if msg.loggedIn {
+				m.sync.err = ""
+				m.sync.msg = "GitHub 登录好了，可以推送/拉取了"
+			} else if setupErr != nil {
+				m.sync.err = "登录没完成（" + setupErr.Error() + "）；可以再选一次「登录 GitHub CLI」"
+			} else {
+				m.sync.err = "还没登录成功；可以再选一次「登录 GitHub CLI」"
+			}
+		}
+
+	case ghSetupMsg:
+		switch msg.how {
+		case "page":
+			m.sync.busy = false
+		default:
+			// 安装器返回非零不代表没装上，一律重新看一眼再说话
+			m.sync.ghRetry, m.sync.setupErr = msg.how, msg.err
+			return m, ghCheckCmd()
+		}
 	}
 	return m, nil
 }
@@ -1042,7 +1110,7 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "y":
 			m.state = syncPage
 			m.sync = syncView{}
-			return m, nil
+			return m, ghCheckCmd()
 		case "r":
 			return m.refresh()
 		case "q", "esc":
@@ -1212,24 +1280,34 @@ type syncItem struct {
 }
 
 // syncItems 按本机是否已经连过同步给出菜单：没连过只留「开始」和「接上」，
-// 免得第一屏就摆一堆还用不上的强制覆盖
+// 免得第一屏就摆一堆还用不上的强制覆盖。gh 没装或没登录时，最上面先放
+// 「安装 / 登录 GitHub CLI」——这两步不做，后面的推送拉取都没法开始。
 func (m tuiModel) syncItems() []syncItem {
+	var head []syncItem
+	switch {
+	case m.sync.ghChecked && !m.sync.ghFound:
+		plan := ghInstaller()
+		head = append(head, syncItem{"ghsetup", plan.label, plan.desc})
+	case m.sync.ghChecked && m.sync.ghFound && !m.sync.ghLogin:
+		head = append(head, syncItem{"ghlogin", "登录 GitHub CLI", "在页面里跑 gh auth login，浏览器里确认一下"})
+	}
+
 	st, _ := loadSyncState()
 	if !syncEnabled(st) {
-		return []syncItem{
-			{"push", "开始同步（首次推送）", "在 GitHub 建私有仓库，把配置加密后推上去；要设一个同步密码"},
-			{"pull", "从已有仓库拉取", "另一台设备推过之后，在这里输入同一个密码接上"},
-		}
+		return append(head,
+			syncItem{"push", "开始同步（首次推送）", "在 GitHub 建私有仓库，把配置加密后推上去；要设一个同步密码"},
+			syncItem{"pull", "从已有仓库拉取", "另一台设备推过之后，在这里输入同一个密码接上"},
+		)
 	}
-	return []syncItem{
-		{"push", "推送本机配置", "把本机改动加密后推上去"},
-		{"pull", "拉取远端配置", "把远端较新的配置写回本机"},
-		{"preview", "预览远端会改哪些文件", "只解密看清单，不动本机文件"},
-		{"forcepush", "强制推送（覆盖远端）", "远端有别的设备的新版本时也拿本机覆盖"},
-		{"forcepull", "强制拉取（覆盖本机）", "本机有没推上去的改动也覆盖"},
-		{"addpath", "添加要同步的文件", "额外同步 config:… / home:… / ~/… 下的文件"},
-		{"off", "忘掉本机的仓库和密钥", "远端仓库里的数据不动"},
-	}
+	return append(head,
+		syncItem{"push", "推送本机配置", "把本机改动加密后推上去"},
+		syncItem{"pull", "拉取远端配置", "把远端较新的配置写回本机"},
+		syncItem{"preview", "预览远端会改哪些文件", "只解密看清单，不动本机文件"},
+		syncItem{"forcepush", "强制推送（覆盖远端）", "远端有别的设备的新版本时也拿本机覆盖"},
+		syncItem{"forcepull", "强制拉取（覆盖本机）", "本机有没推上去的改动也覆盖"},
+		syncItem{"addpath", "添加要同步的文件", "额外同步 config:… / home:… / ~/… 下的文件"},
+		syncItem{"off", "忘掉本机的仓库和密钥", "远端仓库里的数据不动"},
+	)
 }
 
 // handleSyncKey 管同步页：菜单、密码输入、路径输入三种状态
@@ -1257,6 +1335,10 @@ func (m tuiModel) handleSyncKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sync = syncView{}
 	case "q":
 		return m, tea.Quit
+	case "r":
+		// 重新看一眼 gh：手动装完、或者刚才检测失败时用
+		m.sync.err, m.sync.msg = "", ""
+		return m, ghCheckCmd()
 	case "up", "k":
 		if m.sync.cursor > 0 {
 			m.sync.cursor--
@@ -1275,6 +1357,33 @@ func (m tuiModel) handleSyncKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m tuiModel) syncChoose(it syncItem) (tea.Model, tea.Cmd) {
 	switch it.action {
+	case "ghsetup":
+		plan := ghInstaller()
+		m.sync.err, m.sync.msg = "", ""
+		m.sync.offArmed = false
+		if plan.cmd == nil {
+			// 没有能自动装的包管理器：开官方下载页，装完按 r 重新检测
+			m.sync.msg = "下载页已经在浏览器里打开；装好以后按 r 重新检测"
+			return m, tea.ExecProcess(openURLCommand(ghDownloadURL), func(err error) tea.Msg {
+				return ghSetupMsg{how: "page", err: err}
+			})
+		}
+		m.sync.busy = true
+		return m, tea.ExecProcess(plan.cmd, func(err error) tea.Msg {
+			return ghSetupMsg{how: "install", err: err}
+		})
+	case "ghlogin":
+		path, ok := ghPath()
+		if !ok {
+			m.sync.err = "没找到 gh；先选「安装 GitHub CLI」"
+			return m, nil
+		}
+		m.sync.err, m.sync.msg = "", ""
+		m.sync.offArmed = false
+		m.sync.busy = true
+		return m, tea.ExecProcess(exec.Command(path, "auth", "login"), func(err error) tea.Msg {
+			return ghSetupMsg{how: "login", err: err}
+		})
 	case "addpath":
 		m.sync.mode = syncPath
 		m.sync.path = ""
@@ -1294,6 +1403,15 @@ func (m tuiModel) syncChoose(it syncItem) (tea.Model, tea.Cmd) {
 	}
 
 	m.sync.offArmed = false
+	// 推送/拉取都靠 gh 拿 token：没装或没登录时先去最上面那两项，别让用户白输一遍密码
+	if m.sync.ghChecked && !m.sync.ghFound {
+		m.sync.msg, m.sync.err = "", "还没装 GitHub CLI；先选「安装 GitHub CLI」"
+		return m, nil
+	}
+	if m.sync.ghChecked && !m.sync.ghLogin {
+		m.sync.msg, m.sync.err = "", "GitHub CLI 还没登录；先选「登录 GitHub CLI」"
+		return m, nil
+	}
 	st, _ := loadSyncState()
 	if st.Key == "" {
 		// 本机没记住密钥：先从密码算出钥匙，再让后台执行
@@ -2739,6 +2857,7 @@ func (m tuiModel) viewSync() string {
 	}
 	type field struct{ k, v string }
 	fields := []field{
+		{"GitHub", m.ghFieldLine()},
 		{"仓库", repo},
 		{"密钥", keyLine},
 	}
@@ -2785,7 +2904,11 @@ func (m tuiModel) viewSync() string {
 
 	switch {
 	case m.sync.busy:
-		b.WriteString("\n  " + m.spin.View() + "  " + styles.Dim.Render("正在和 GitHub 同步…") + "\n")
+		busy := "正在和 GitHub 同步…"
+		if m.sync.ghRetry != "" {
+			busy = "正在检查 GitHub CLI…"
+		}
+		b.WriteString("\n  " + m.spin.View() + "  " + styles.Dim.Render(busy) + "\n")
 	case m.sync.mode == syncPass:
 		b.WriteString("\n")
 		prompt := "同步密码"
@@ -2818,9 +2941,34 @@ func (m tuiModel) viewSync() string {
 	case syncPath:
 		b.WriteString(m.viewHints("enter", "加入同步", "esc", "取消", "ctrl+c", "退出"))
 	default:
-		b.WriteString(m.viewHints("↑↓", "选择", "enter", "执行", "esc", "返回", "ctrl+c", "退出"))
+		hints := []string{"↑↓", "选择", "enter", "执行"}
+		if m.sync.ghChecked && (!m.sync.ghFound || !m.sync.ghLogin) {
+			hints = append(hints, "r", "重新检测")
+		}
+		hints = append(hints, "esc", "返回", "ctrl+c", "退出")
+		b.WriteString(m.viewHints(hints...))
 	}
 	return b.String()
+}
+
+// ghFieldLine 是同步页上 GitHub CLI 那行：检测中 / 没装 / 没登录 / 已登录
+func (m tuiModel) ghFieldLine() string {
+	ver := strings.TrimSpace(m.sync.ghVer)
+	switch {
+	case !m.sync.ghChecked:
+		return "检测中…"
+	case !m.sync.ghFound:
+		return "没装（在下面菜单里可以直接装）"
+	case !m.sync.ghLogin:
+		if ver != "" {
+			return "gh " + ver + " · 没登录"
+		}
+		return "gh 没登录"
+	}
+	if ver != "" {
+		return "gh " + ver + " · 已登录"
+	}
+	return "gh 已登录"
 }
 
 // syncHeadline 是同步页最上面那一句：连没连（推送/拉取时间在下面几行里）

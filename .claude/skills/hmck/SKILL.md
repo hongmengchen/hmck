@@ -180,6 +180,9 @@ TUI 列表上按 `y` 就是同一套能力的同步页：看状态、推送/拉�
 忘掉本机密钥；本机没记住密钥时密码直接在页面里掩码输入（首次推送输两遍），只用于这一次请求。
 agent 仍然走上面的 CLI，不要启动 TUI。
 登录借 gh CLI（`gh auth token`），没登录先让用户跑 `gh auth login`；hmck 不保存 GitHub 凭据。
+本机没装或没登录 gh 时，同步页最前面会先给「安装 GitHub CLI」「登录 GitHub CLI」——安装走
+winget / scoop / choco / Homebrew / apt / dnf / pacman，没有包管理器就打开 cli.github.com，
+`r` 重新检测。这是给人在 TUI 里用的，agent 不要替用户装软件或登录。
 加密是 PBKDF2-HMAC-SHA256（60 万次）+ AES-256-GCM，GitHub 上只有密文。
 同步内容：hmck 的 `config.json` / `tools.json`，各工具声明的配置（kube-token、npm-token、
 argo-token 的配置和 `~/.argocd/token`），以及用户 `sync add` 的路径。
