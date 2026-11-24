@@ -638,6 +638,9 @@ func syncRunCmd(action, pass string) tea.Cmd {
 		case "forcepull":
 			msg, err := syncPull(syncOptions{pass: pass, force: true})
 			return syncActionMsg{action: action, msg: msg, err: err, reload: err == nil}
+		case "devices":
+			msg, err := refreshSyncDevices()
+			return syncActionMsg{action: action, msg: msg, err: err}
 		case "off":
 			repo, err := disableSync()
 			if err != nil {
@@ -652,6 +655,10 @@ func syncRunCmd(action, pass string) tea.Cmd {
 		return syncActionMsg{action: action, err: fmt.Errorf("未知的同步动作 %q", action)}
 	}
 }
+
+// autoSyncAsync 在后台把改过的配置推一次。单独抽出来是为了测试：
+// 真实运行时是 goroutine，测试里换成空函数，免得没跑完的推送漏到下一个用例。
+var autoSyncAsync = func() { go autoSyncPush() }
 
 // refreshSyncLine 用本机的 sync.json 重算列表上那一行同步状态
 func (m *tuiModel) refreshSyncLine() {
@@ -865,7 +872,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.states = append(m.states, st)
 		m.cursor = len(m.states) - 1
 		m.cat.err = ""
-		go autoSyncPush()
+		autoSyncAsync()
 		// 挑中就是为了装：写进配置后直接开始下载
 		return m.startInstall(st)
 
@@ -880,7 +887,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.states = append(m.states, st)
 		m.cursor = len(m.states) - 1
 		m.add = addView{}
-		go autoSyncPush()
+		autoSyncAsync()
 		// 加进来就是为了用：接着装，不用再按一次 enter
 		return m.startInstall(st)
 
@@ -917,7 +924,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.sync.msg = ""
 			m.sync.err = msg.err.Error()
-			m.syncLine = "同步失败：" + msg.err.Error()
+			// 刷新设备列表失败不影响同步本身，别把错误挂到列表页的同步状态上
+			if msg.action != "devices" {
+				m.syncLine = "同步失败：" + msg.err.Error()
+			}
 		} else {
 			m.sync.err = ""
 			m.sync.msg = msg.msg
@@ -1303,6 +1313,7 @@ func (m tuiModel) syncItems() []syncItem {
 		syncItem{"push", "推送本机配置", "把本机改动加密后推上去"},
 		syncItem{"pull", "拉取远端配置", "把远端较新的配置写回本机"},
 		syncItem{"preview", "预览远端会改哪些文件", "只解密看清单，不动本机文件"},
+		syncItem{"devices", "刷新设备列表", "从远端解密看一眼参与同步的设备，不动文件"},
 		syncItem{"forcepush", "强制推送（覆盖远端）", "远端有别的设备的新版本时也拿本机覆盖"},
 		syncItem{"forcepull", "强制拉取（覆盖本机）", "本机有没推上去的改动也覆盖"},
 		syncItem{"addpath", "添加要同步的文件", "额外同步 config:… / home:… / ~/… 下的文件"},
@@ -1892,7 +1903,7 @@ func (m *tuiModel) saveCfg() {
 	}
 	m.cfgErr = ""
 	// 开关也是同步内容：保存后顺手推一下（没开同步时什么都不做）
-	go autoSyncPush()
+	autoSyncAsync()
 }
 
 func (m *tuiModel) clampCursor() {
@@ -2884,6 +2895,15 @@ func (m tuiModel) viewSync() string {
 	if st.LastError != "" {
 		b.WriteString("  " + styles.Warn.Render(theme.Truncate("上次失败 "+st.LastError, max(w-2, 10))) + "\n")
 	}
+	if len(st.Devices) > 0 {
+		// 菜单、结果行、提示还要占地方：剩下的行给设备，页面矮就压成一行
+		used := strings.Count(b.String(), "\n")
+		space := 8
+		if m.height > 0 {
+			space = m.height - 2 - used - (1 + len(items) + 4 + 1 + 1)
+		}
+		b.WriteString(m.syncDeviceField(st, keyW, w, space))
+	}
 	b.WriteString("\n")
 
 	labelW := 0
@@ -2947,6 +2967,44 @@ func (m tuiModel) viewSync() string {
 		}
 		hints = append(hints, "esc", "返回", "ctrl+c", "退出")
 		b.WriteString(m.viewHints(hints...))
+	}
+	return b.String()
+}
+
+// syncDeviceField 是同步页上的「设备」块：一台一行，页面不够高时压成一行。
+// 数据来自本机 sync.json 的缓存，push/pull/刷新设备列表时更新。
+func (m tuiModel) syncDeviceField(st syncState, keyW, w, space int) string {
+	if len(st.Devices) == 0 || space < 1 {
+		return ""
+	}
+	list := sortSyncDevicesByActivity(st.Devices)
+	names := make([]string, len(list))
+	for i, d := range list {
+		names[i] = deviceDisplayName(d)
+		if d.ID != "" && d.ID == st.DeviceID {
+			names[i] += "（这台）"
+		}
+	}
+	head := "  " + styles.Dim.Render(theme.Pad("设备", keyW)) + "  "
+	if space < 3 {
+		return head + styles.Dim.Render(theme.Truncate(
+			fmt.Sprintf("%d 台：%s", len(list), strings.Join(names, "、")), max(w-keyW-4, 10))) + "\n"
+	}
+	pad := "  " + strings.Repeat(" ", keyW) + "  "
+	body := space - 1 // 去掉标题那行
+	if len(list) > body {
+		body-- // 留一行给「还有 N 台」
+	}
+	show := min(len(list), min(body, 4))
+
+	var b strings.Builder
+	b.WriteString(head + styles.Dim.Render(fmt.Sprintf("%d 台", len(list))) + "\n")
+	for i := 0; i < show; i++ {
+		line := fmt.Sprintf("· %s · %s", names[i], deviceBadge(list[i]))
+		b.WriteString(pad + styles.Dim.Render(theme.Truncate(line, max(w-keyW-4, 10))) + "\n")
+	}
+	if more := len(list) - show; more > 0 {
+		b.WriteString(pad + styles.Dim.Render(fmt.Sprintf("还有 %d 台", more)) + "\n")
 	}
 	return b.String()
 }

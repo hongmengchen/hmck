@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -50,16 +51,28 @@ var syncMu sync.Mutex
 // 本机 0600 文件里，攻破 GitHub 仓库拿不到。LastSHA 是上次看到/写入的远端文件
 // SHA，用来发现「别的设备推过新版本」；LastHash 是本地打包内容的哈希，没变就不推。
 type syncState struct {
-	Repo       string   `json:"repo,omitempty"`
-	Key        string   `json:"key,omitempty"`
-	Salt       []byte   `json:"salt,omitempty"`
-	Iter       int      `json:"iter,omitempty"`
-	LastSHA    string   `json:"last_sha,omitempty"`
-	LastHash   string   `json:"last_hash,omitempty"`
-	LastPush   string   `json:"last_push,omitempty"`
-	LastPull   string   `json:"last_pull,omitempty"`
-	LastError  string   `json:"last_error,omitempty"`
-	ExtraPaths []string `json:"extra_paths,omitempty"`
+	Repo       string       `json:"repo,omitempty"`
+	Key        string       `json:"key,omitempty"`
+	Salt       []byte       `json:"salt,omitempty"`
+	Iter       int          `json:"iter,omitempty"`
+	LastSHA    string       `json:"last_sha,omitempty"`
+	LastHash   string       `json:"last_hash,omitempty"`
+	LastPush   string       `json:"last_push,omitempty"`
+	LastPull   string       `json:"last_pull,omitempty"`
+	LastError  string       `json:"last_error,omitempty"`
+	ExtraPaths []string     `json:"extra_paths,omitempty"`
+	DeviceID   string       `json:"device_id,omitempty"` // 这台机器的固定 ID
+	Devices    []syncDevice `json:"devices,omitempty"`   // 参与同步的设备缓存，离线也能看
+}
+
+// syncDevice 是一台参与同步的机器。它跟着加密的 payload 走——GitHub 上只看到密文，
+// 换机器 pull 回来也不会丢；本机再留一份缓存，状态页没网也能列出来。
+type syncDevice struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	OS       string `json:"os,omitempty"`
+	LastPush string `json:"last_push,omitempty"` // RFC3339（UTC）
+	LastPull string `json:"last_pull,omitempty"`
 }
 
 func syncStatePath() (string, error) {
@@ -258,10 +271,194 @@ type syncFile struct {
 // Paths 是「额外同步路径」清单：另一台机器 pull 之后也照这份继续带，
 // 不用每台都手工 hmck sync add 一遍。
 type syncPayload struct {
-	Version   int        `json:"version"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	Paths     []string   `json:"paths,omitempty"`
-	Files     []syncFile `json:"files"`
+	Version   int          `json:"version"`
+	UpdatedAt time.Time    `json:"updated_at"`
+	Paths     []string     `json:"paths,omitempty"`
+	Files     []syncFile   `json:"files"`
+	Devices   []syncDevice `json:"devices,omitempty"`
+}
+
+// localDeviceID 给这台机器一个稳定 ID；sync.json 里没有就现生成一个
+func localDeviceID(st *syncState) string {
+	if st.DeviceID != "" {
+		return st.DeviceID
+	}
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	st.DeviceID = hex.EncodeToString(b)
+	return st.DeviceID
+}
+
+// localDeviceName 是这台机器在设备列表里的名字：主机名，拿不到就叫「未知设备」
+func localDeviceName() string {
+	name, err := os.Hostname()
+	if err != nil || strings.TrimSpace(name) == "" {
+		return "未知设备"
+	}
+	return strings.TrimSpace(name)
+}
+
+// touchLocalDevice 在这台机器的登记项上记一笔推送/拉取时间
+func touchLocalDevice(st *syncState, push, pull bool) syncDevice {
+	now := time.Now().UTC().Format(time.RFC3339)
+	id := localDeviceID(st)
+	dev := syncDevice{ID: id, Name: localDeviceName(), OS: runtime.GOOS}
+	if old, ok := findSyncDevice(st.Devices, id); ok {
+		dev = old
+		// 主机名改了就跟着改；ID 不变，历史时间也还在
+		dev.Name, dev.OS = localDeviceName(), runtime.GOOS
+	}
+	if push {
+		dev.LastPush = now
+	}
+	if pull {
+		dev.LastPull = now
+	}
+	return dev
+}
+
+func findSyncDevice(list []syncDevice, id string) (syncDevice, bool) {
+	for _, d := range list {
+		if d.ID == id {
+			return d, true
+		}
+	}
+	return syncDevice{}, false
+}
+
+// mergeSyncDevices 按 ID 合并几份设备表：每台设备保留较晚的活动时间和非空的名字。
+// 结果按 ID 排序，同样内容每次打出来的 JSON 一样。
+func mergeSyncDevices(lists ...[]syncDevice) []syncDevice {
+	byID := make(map[string]syncDevice)
+	for _, list := range lists {
+		for _, d := range list {
+			d.ID = strings.TrimSpace(d.ID)
+			if d.ID == "" {
+				continue
+			}
+			old, ok := byID[d.ID]
+			if !ok {
+				byID[d.ID] = d
+				continue
+			}
+			byID[d.ID] = newerSyncDevice(old, d)
+		}
+	}
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]syncDevice, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, byID[id])
+	}
+	return out
+}
+
+// newerSyncDevice 取两份登记里更新的信息：名字/系统用新的，时间各取较晚的
+func newerSyncDevice(a, b syncDevice) syncDevice {
+	out := a
+	if b.Name != "" {
+		out.Name = b.Name
+	}
+	if b.OS != "" {
+		out.OS = b.OS
+	}
+	out.LastPush = laterSyncTime(a.LastPush, b.LastPush)
+	out.LastPull = laterSyncTime(a.LastPull, b.LastPull)
+	return out
+}
+
+// laterSyncTime 比两个 RFC3339 时间串；解析不了就当普通字符串比
+func laterSyncTime(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	}
+	ta, ea := time.Parse(time.RFC3339, a)
+	tb, eb := time.Parse(time.RFC3339, b)
+	if ea == nil && eb == nil {
+		if tb.After(ta) {
+			return b
+		}
+		return a
+	}
+	if b > a {
+		return b
+	}
+	return a
+}
+
+// upsertSyncDevice 把一台设备的登记写进列表，结果仍按 ID 排序
+func upsertSyncDevice(list []syncDevice, dev syncDevice) []syncDevice {
+	out := make([]syncDevice, 0, len(list)+1)
+	replaced := false
+	for _, d := range list {
+		if d.ID == dev.ID {
+			out = append(out, dev)
+			replaced = true
+			continue
+		}
+		out = append(out, d)
+	}
+	if !replaced {
+		out = append(out, dev)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// formatSyncRFC3339 把设备记录里的时间换成本机时区的「01-02 15:04」
+func formatSyncRFC3339(s string) string {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return s
+	}
+	return t.Local().Format("01-02 15:04")
+}
+
+// deviceBadge 是设备后面那句「推送 11-24 09:12」：取最近的一次活动
+func deviceBadge(d syncDevice) string {
+	switch {
+	case d.LastPush == "" && d.LastPull == "":
+		return "还没有记录"
+	case d.LastPull == "" || (d.LastPush != "" && d.LastPush > d.LastPull):
+		return "推送 " + formatSyncRFC3339(d.LastPush)
+	default:
+		return "拉取 " + formatSyncRFC3339(d.LastPull)
+	}
+}
+
+// sortSyncDevicesByActivity 按最近一次活动排序，给展示用（存储顺序仍按 ID）
+func sortSyncDevicesByActivity(list []syncDevice) []syncDevice {
+	out := append([]syncDevice(nil), list...)
+	activity := func(d syncDevice) string {
+		if d.LastPush > d.LastPull {
+			return d.LastPush
+		}
+		return d.LastPull
+	}
+	sort.SliceStable(out, func(i, j int) bool { return activity(out[i]) > activity(out[j]) })
+	return out
+}
+
+// deviceDisplayName 拿到能用名字显示的名字，没有就用 ID 前 8 位
+func deviceDisplayName(d syncDevice) string {
+	if strings.TrimSpace(d.Name) != "" {
+		return d.Name
+	}
+	if len(d.ID) > 8 {
+		return d.ID[:8]
+	}
+	if d.ID != "" {
+		return d.ID
+	}
+	return "未知设备"
 }
 
 // syncNames 列出要同步的逻辑路径：hmck 自己的两个配置文件，加上每个工具

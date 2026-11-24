@@ -15,6 +15,8 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	userCacheDir = func() (string, error) { return dir, nil }
+	// 后台自动推送是 goroutine：用例结束它可能才跑，会把数据推到下一个用例的临时目录里
+	autoSyncAsync = func() {}
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

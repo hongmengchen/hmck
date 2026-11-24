@@ -3,7 +3,9 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -171,8 +173,12 @@ func TestSyncPageAddPath(t *testing.T) {
 	writeSyncTestState(t, "pw")
 	m := newTUIModel()
 	m.state = syncPage
-	m.sync = syncView{cursor: 5} // 「添加要同步的文件」
+	m.sync = syncView{}
 
+	m.sync.cursor = syncActionIndex(m, "addpath")
+	if m.sync.cursor < 0 {
+		t.Fatal("同步页里没有「添加要同步的文件」")
+	}
 	updated, _ := m.handleSyncKey(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(tuiModel)
 	if m.sync.mode != syncPath {
@@ -286,5 +292,134 @@ func TestSyncPageInstallResult(t *testing.T) {
 	m = updated.(tuiModel)
 	if !strings.Contains(m.sync.err, "安装没成功") || !strings.Contains(m.sync.err, "exit status 1") {
 		t.Fatalf("安装失败应该带上原因: %q", m.sync.err)
+	}
+}
+
+// syncActionIndex 在同步页菜单里找一个动作的下标；找不到返回 -1
+func syncActionIndex(m tuiModel, action string) int {
+	for i, it := range m.syncItems() {
+		if it.action == action {
+			return i
+		}
+	}
+	return -1
+}
+
+// 同步页要把参与同步的设备列出来，本机那台标「这台」
+func TestSyncPageShowsDevices(t *testing.T) {
+	_, _, _ = setupSyncTest(t)
+	writeSyncTestState(t, "pw")
+	st, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.DeviceID = "aaaa1111"
+	st.Devices = []syncDevice{
+		{ID: "aaaa1111", Name: "mac-mini", OS: "darwin", LastPush: "2026-11-24T01:00:00Z"},
+		{ID: "bbbb2222", Name: "win-11", OS: "windows", LastPull: "2026-11-23T02:00:00Z"},
+	}
+	if _, err := saveSyncState(st); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTUIModel()
+	m.width, m.height = 100, 40
+	m.state = syncPage
+	m.sync = syncView{ghChecked: true, ghFound: true, ghLogin: true}
+	view := m.viewSync()
+	for _, want := range []string{"设备", "2 台", "mac-mini（这台）", "win-11"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("同步页里没有 %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "（这台）win-11") {
+		t.Errorf("别的设备不该标「这台」:\n%s", view)
+	}
+}
+
+// 页面矮的时候设备压成一行，名字还得看得到，别把菜单挤出屏幕
+func TestSyncPageDevicesCompactOnShortTerminal(t *testing.T) {
+	_, _, _ = setupSyncTest(t)
+	writeSyncTestState(t, "pw")
+	st, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.DeviceID = "aaaa1111"
+	st.Devices = []syncDevice{
+		{ID: "aaaa1111", Name: "mac-mini", LastPush: "2026-11-24T01:00:00Z"},
+		{ID: "bbbb2222", Name: "win-11", LastPush: "2026-11-23T02:00:00Z"},
+		{ID: "cccc3333", Name: "ci-box", LastPush: "2026-11-22T02:00:00Z"},
+	}
+	if _, err := saveSyncState(st); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTUIModel()
+	m.width, m.height = 100, 26
+	m.state = syncPage
+	m.sync = syncView{ghChecked: true, ghFound: true, ghLogin: true}
+	view := m.viewSync()
+	if !strings.Contains(view, "win-11") {
+		t.Errorf("矮屏上设备名也该在:\n%s", view)
+	}
+	if got := strings.Count(view, "\n"); m.height > 0 && got > m.height {
+		t.Errorf("同步页 %d 行，超过终端高度 %d", got, m.height)
+	}
+}
+
+// 选「刷新设备列表」：从远端解密只更新设备缓存，不动 LastSHA
+func TestSyncPageRefreshDevices(t *testing.T) {
+	_, home, _ := setupSyncTest(t)
+	if err := os.MkdirAll(filepath.Join(home, ".argocd"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".argocd", "token"), []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeSyncTestState(t, "pw")
+	if _, err := syncPush(syncOptions{}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	// 本机把设备缓存丢了（换过 sync.json、或者从旧版本升上来）
+	st, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Devices = nil
+	if _, err := saveSyncState(st); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTUIModel()
+	m.width, m.height = 100, 40
+	m.state = syncPage
+	m.sync = syncView{ghChecked: true, ghFound: true, ghLogin: true, cursor: syncActionIndex(m, "devices")}
+	if m.sync.cursor < 0 {
+		t.Fatal("同步页里没有「刷新设备列表」")
+	}
+	updated, cmd := m.handleSyncKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if cmd == nil || !m.sync.busy {
+		t.Fatalf("选刷新后应该开始跑: cmd=%v busy=%v", cmd, m.sync.busy)
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(tuiModel)
+	if m.sync.err != "" {
+		t.Fatalf("刷新失败: %v", m.sync.err)
+	}
+	if !strings.Contains(m.sync.msg, "设备列表已更新：1 台") {
+		t.Errorf("刷新结果不对: %q", m.sync.msg)
+	}
+	after, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Devices) != 1 || after.Devices[0].ID != st.DeviceID {
+		t.Fatalf("设备缓存没补回来: %+v", after.Devices)
+	}
+	if after.LastSHA != st.LastSHA {
+		t.Errorf("刷新不该动 LastSHA: %q -> %q", st.LastSHA, after.LastSHA)
 	}
 }

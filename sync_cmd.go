@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -66,6 +65,10 @@ func runSync(args []string) int {
 		syncUsage(os.Stdout)
 		return 0
 	}
+	// hmck sync --json 就是 hmck sync status --json
+	if strings.HasPrefix(args[0], "-") {
+		return runSyncStatus(args)
+	}
 	fmt.Fprintf(os.Stderr, "未知的 sync 子命令: %s\n\n", args[0])
 	syncUsage(os.Stderr)
 	return 2
@@ -75,7 +78,8 @@ func syncUsage(w io.Writer) {
 	fmt.Fprintf(w, `hmck sync — 多端同步本机工具配置（GitHub 私有仓库，加密存放）
 
 用法:
-  hmck sync                 看同步状态
+  hmck sync                 看同步状态（仓库、密钥、上次推送/拉取、设备、同步清单）
+  hmck sync --json          同样的状态，给脚本/agent 解析
   hmck sync push            把本机配置加密后推到仓库；第一次会建仓库、设密码
   hmck sync pull            把仓库里的配置拉下来（--dry-run 只看会改哪些文件）
   hmck sync add <路径>      额外同步一个文件（config:… / home:… / ~/…）
@@ -117,23 +121,12 @@ func runSyncStatus(args []string) int {
 		fmt.Fprintf(os.Stderr, "同步清单有问题: %v\n", nerr)
 	}
 	gh := "未安装"
-	if _, err := exec.LookPath("gh"); err == nil {
+	if _, ok := ghPath(); ok {
 		gh = "已安装（登录状态在 push/pull 时检查）"
 	}
 
 	if *asJSON {
-		out := map[string]any{
-			"enabled":     syncEnabled(st),
-			"repo":        st.Repo,
-			"gh":          gh,
-			"has_key":     st.Key != "",
-			"files":       names,
-			"extra_paths": st.ExtraPaths,
-			"last_push":   st.LastPush,
-			"last_pull":   st.LastPull,
-			"last_error":  st.LastError,
-		}
-		data, _ := json.MarshalIndent(out, "", "  ")
+		data, _ := json.MarshalIndent(syncStatusJSON(st, names, gh), "", "  ")
 		fmt.Println(string(data))
 		return 0
 	}
@@ -163,6 +156,18 @@ func runSyncStatus(args []string) int {
 	if st.LastError != "" {
 		fmt.Printf("上次失败 %s\n", st.LastError)
 	}
+	if len(st.Devices) == 0 {
+		fmt.Printf("设备     还没有记录（push/pull 之后会记下来）\n")
+	} else {
+		fmt.Printf("设备     %d 台\n", len(st.Devices))
+		for _, d := range st.Devices {
+			tag := ""
+			if d.ID != "" && d.ID == st.DeviceID {
+				tag = "（这台）"
+			}
+			fmt.Printf("  · %s%s  %s\n", deviceDisplayName(d), tag, deviceBadge(d))
+		}
+	}
 	fmt.Printf("文件     %d 个\n", len(names))
 	for _, n := range names {
 		abs, err := syncNamePath(n)
@@ -180,6 +185,27 @@ func runSyncStatus(args []string) int {
 		fmt.Printf("  %s%s\n", mark, shortenHome(abs))
 	}
 	return 0
+}
+
+// syncStatusJSON 是 hmck sync status --json 的内容（agent 也读这份）
+func syncStatusJSON(st syncState, names []string, gh string) map[string]any {
+	devices := st.Devices
+	if devices == nil {
+		devices = []syncDevice{} // 空表也输出 []，脚本不用处理 null
+	}
+	return map[string]any{
+		"enabled":     syncEnabled(st),
+		"repo":        st.Repo,
+		"gh":          gh,
+		"has_key":     st.Key != "",
+		"files":       names,
+		"extra_paths": st.ExtraPaths,
+		"last_push":   st.LastPush,
+		"last_pull":   st.LastPull,
+		"last_error":  st.LastError,
+		"device_id":   st.DeviceID,
+		"devices":     devices,
+	}
 }
 
 func runSyncPush(args []string) int {
@@ -431,14 +457,16 @@ func syncPush(opts syncOptions) (string, error) {
 		return "", err
 	}
 	paths := st.ExtraPaths
-	// 推之前先把远端的文件合进来：A 机器有的配置，B 机器没有时推一次不能把它抹掉。
-	// 同名文件以本机为准。
+	var devices []syncDevice
+	// 推之前先把远端的文件和设备表合进来：A 机器有的配置，B 机器没有时推一次不能把它抹掉。
+	// 同名文件以本机为准；设备表按 ID 合并，各机器的推送时间都留着。
 	if sha != "" {
 		if remotePlain, derr := decryptSyncPayload(key, remote); derr == nil {
 			var rp syncPayload
 			if json.Unmarshal(remotePlain, &rp) == nil && rp.Version == syncFormat {
 				files = mergeSyncFiles(files, rp.Files)
 				paths = mergeSyncPaths(paths, rp.Paths)
+				devices = rp.Devices
 			}
 		}
 	}
@@ -451,11 +479,19 @@ func syncPush(opts syncOptions) (string, error) {
 	}
 	st.ExtraPaths = paths
 
+	// 这台机器也在设备表里记一笔，和别的机器合并后一起加密推上去。
+	// 先合并再记时间：远端那台同名设备的时间可能比本机缓存的新。
+	devices = mergeSyncDevices(st.Devices, devices)
+	st.Devices = devices
+	devices = upsertSyncDevice(devices, touchLocalDevice(&st, true, false))
+	st.Devices = devices
+
 	plain, err := json.Marshal(syncPayload{
 		Version:   syncFormat,
 		UpdatedAt: time.Now().UTC(),
 		Paths:     paths,
 		Files:     files,
+		Devices:   devices,
 	})
 	if err != nil {
 		return "", err
@@ -592,6 +628,8 @@ func syncPull(opts syncOptions) (string, error) {
 	st.LastPull = time.Now().Format("2006-01-02 15:04:05")
 	st.LastError = ""
 	st.ExtraPaths = mergeSyncPaths(st.ExtraPaths, p.Paths)
+	st.Devices = mergeSyncDevices(st.Devices, p.Devices)
+	st.Devices = upsertSyncDevice(st.Devices, touchLocalDevice(&st, false, true))
 	if _, err := saveSyncState(st); err != nil {
 		return "", fmt.Errorf("文件已写入，但本机状态没保存: %w", err)
 	}
@@ -599,6 +637,49 @@ func syncPull(opts syncOptions) (string, error) {
 		return fmt.Sprintf("已连接 %s：写入 %d 个文件，%d 个没变", repo, len(written), len(same)), nil
 	}
 	return fmt.Sprintf("已从 %s 拉取：写入 %d 个文件，%d 个没变", repo, len(written), len(same)), nil
+}
+
+// refreshSyncDevices 只读远端的设备表，更新本机缓存：不动任何配置文件，
+// 也不更新 LastSHA（否则下次 push 会以为远端没变，跳过「别的设备推过」的提醒）。
+func refreshSyncDevices() (string, error) {
+	syncMu.Lock()
+	defer syncMu.Unlock()
+
+	st, err := loadSyncState()
+	if err != nil {
+		return "", err
+	}
+	if !syncEnabled(st) {
+		return "", errors.New("这台机器还没连同步")
+	}
+	key, err := syncKeyBytes(st)
+	if err != nil {
+		return "", err
+	}
+	client, err := newGHClient()
+	if err != nil {
+		return "", err
+	}
+	remote, sha, err := client.getFile(st.Repo, syncRemoteFile)
+	if err != nil {
+		return "", err
+	}
+	if sha == "" {
+		return "", fmt.Errorf("仓库 %s 里还没有同步数据", st.Repo)
+	}
+	plain, err := decryptSyncPayload(key, remote)
+	if err != nil {
+		return "", errors.New("本机记住的密钥解不开远端数据")
+	}
+	var p syncPayload
+	if err := json.Unmarshal(plain, &p); err != nil {
+		return "", fmt.Errorf("同步内容不是合法 JSON: %w", err)
+	}
+	st.Devices = mergeSyncDevices(st.Devices, p.Devices)
+	if _, err := saveSyncState(st); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("设备列表已更新：%d 台", len(st.Devices)), nil
 }
 
 // mergeSyncPaths 把远端带回来的额外路径并进本机清单：只增不减，

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -533,4 +534,181 @@ func TestSyncPathListDoesNotIncludeState(t *testing.T) {
 		}
 	}
 	t.Fatal("手工加的路径没出现在清单里")
+}
+
+// 设备表按 ID 合并：时间取较晚的，名字用新的，结果排序稳定
+func TestMergeSyncDevices(t *testing.T) {
+	a := []syncDevice{
+		{ID: "a1", Name: "mac-mini", OS: "darwin", LastPush: "2026-11-24T01:00:00Z"},
+		{ID: "b2", Name: "win-11", LastPull: "2026-11-23T02:00:00Z"},
+	}
+	b := []syncDevice{
+		{ID: "a1", Name: "mac-mini-2", LastPush: "2026-11-20T01:00:00Z", LastPull: "2026-11-24T02:00:00Z"},
+		{ID: "c3", Name: "ci-box"},
+	}
+	got := mergeSyncDevices(a, b)
+	if len(got) != 3 {
+		t.Fatalf("合并后应该 3 台: %+v", got)
+	}
+	if got[0].ID != "a1" || got[1].ID != "b2" || got[2].ID != "c3" {
+		t.Fatalf("应按 ID 排序: %+v", got)
+	}
+	if got[0].Name != "mac-mini-2" {
+		t.Errorf("名字应该用新的: %+v", got[0])
+	}
+	if got[0].LastPush != "2026-11-24T01:00:00Z" || got[0].LastPull != "2026-11-24T02:00:00Z" {
+		t.Errorf("时间应该各取较晚的: %+v", got[0])
+	}
+	// 没有 ID 的登记项丢掉，别在列表里冒出一台无名设备
+	if got := mergeSyncDevices([]syncDevice{{Name: "ghost"}}); len(got) != 0 {
+		t.Errorf("空 ID 不该进设备表: %+v", got)
+	}
+}
+
+func TestUpsertSyncDevice(t *testing.T) {
+	list := []syncDevice{{ID: "a1", Name: "old"}, {ID: "b2", Name: "win-11"}}
+	got := upsertSyncDevice(list, syncDevice{ID: "a1", Name: "new"})
+	if len(got) != 2 || got[0].ID != "a1" || got[0].Name != "new" {
+		t.Fatalf("同 ID 应该替换: %+v", got)
+	}
+	got = upsertSyncDevice(got, syncDevice{ID: "c3", Name: "ci-box"})
+	if len(got) != 3 || got[2].ID != "c3" {
+		t.Fatalf("新设备应该插到末尾: %+v", got)
+	}
+}
+
+// 两台机器交替推送/拉取，设备表要互相看得到，ID 各是各的
+func TestSyncDevicesAcrossMachines(t *testing.T) {
+	fake, home, _ := setupSyncTest(t)
+	tokenPath := filepath.Join(home, ".argocd", "token")
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("from-a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := writeSyncTestState(t, "shared-pass")
+
+	// 机器 A 第一次推送
+	if _, err := syncPush(syncOptions{}); err != nil {
+		t.Fatalf("A push: %v", err)
+	}
+	stA, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stA.DeviceID == "" || len(stA.Devices) != 1 {
+		t.Fatalf("A 推完应该有自己一条设备记录: %+v", stA)
+	}
+	devA := stA.Devices[0]
+	if devA.LastPush == "" || devA.ID != stA.DeviceID {
+		t.Fatalf("A 的记录不对: %+v", devA)
+	}
+
+	// 机器 B：什么都不记得，只带密码拉下来
+	if _, err := saveSyncState(syncState{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncPull(syncOptions{pass: "shared-pass"}); err != nil {
+		t.Fatalf("B pull: %v", err)
+	}
+	stB, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stB.DeviceID == "" || stB.DeviceID == devA.ID {
+		t.Fatalf("B 应该有自己的 ID: A=%q B=%q", devA.ID, stB.DeviceID)
+	}
+	if len(stB.Devices) != 2 {
+		t.Fatalf("B 应该看到两台设备: %+v", stB.Devices)
+	}
+	if dev, ok := findSyncDevice(stB.Devices, devA.ID); !ok || dev.Name == "" {
+		t.Fatalf("B 的设备表里没有 A: %+v", stB.Devices)
+	}
+
+	// B 改了配置推上去，远端要记着两台
+	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte("# b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stB.ExtraPaths = []string{"home:.zshrc"}
+	if _, err := saveSyncState(stB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncPush(syncOptions{}); err != nil {
+		t.Fatalf("B push: %v", err)
+	}
+	plain, err := decryptSyncPayload(key, fake.files["alice/"+syncRepoName+"/"+syncRemoteFile])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p syncPayload
+	if err := json.Unmarshal(plain, &p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Devices) != 2 {
+		t.Fatalf("远端应该有 A、B 两台: %+v", p.Devices)
+	}
+
+	// 回到 A：刷新设备列表就能看到 B，不用等下一次 pull
+	if _, err := saveSyncState(stA); err != nil {
+		t.Fatal(err)
+	}
+	if msg, err := refreshSyncDevices(); err != nil || !strings.Contains(msg, "设备列表已更新：2 台") {
+		t.Fatalf("A 刷新设备: %q %v", msg, err)
+	}
+	stA, err = loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dev, ok := findSyncDevice(stA.Devices, stB.DeviceID); !ok || dev.LastPush == "" {
+		t.Fatalf("A 没看到 B 的推送记录: %+v", stA.Devices)
+	}
+}
+
+// sync status --json 里要有设备表，agent 直接读
+func TestSyncStatusJSONHasDevices(t *testing.T) {
+	st := syncState{
+		Repo:     "alice/" + syncRepoName,
+		Key:      "k",
+		DeviceID: "a1",
+		Devices:  []syncDevice{{ID: "a1", Name: "mac-mini", LastPush: "2026-11-24T01:00:00Z"}},
+	}
+	data := syncStatusJSON(st, []string{"home:.zshrc"}, "已安装")
+	devices, ok := data["devices"].([]syncDevice)
+	if !ok || len(devices) != 1 || devices[0].Name != "mac-mini" {
+		t.Fatalf("JSON 里没有设备表: %+v", data["devices"])
+	}
+	if data["device_id"] != "a1" {
+		t.Errorf("device_id 不对: %v", data["device_id"])
+	}
+}
+
+// hmck sync --json 走的是 status：输出里有设备表字段
+func TestSyncFlagsGoToStatus(t *testing.T) {
+	isolateConfig(t)
+	out, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = out
+	code := runSync([]string{"--json"})
+	os.Stdout = old
+	if code != 0 {
+		t.Fatalf("hmck sync --json 退出码 %d", code)
+	}
+	if _, err := out.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("输出不是 JSON: %v\n%s", err, data)
+	}
+	if _, ok := got["devices"]; !ok {
+		t.Errorf("status JSON 里没有 devices: %s", data)
+	}
 }

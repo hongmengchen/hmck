@@ -168,17 +168,20 @@ GitLab 工具如 glab 用 GitLab API）；
 ## 多端同步
 
 ```bash
-hmck sync                    # 状态：仓库、是否已记住密钥、上次推送/拉取、同步清单
-hmck sync --json             # 给脚本/agent 解析
+hmck sync                    # 状态：仓库、是否已记住密钥、上次推送/拉取、设备、同步清单
+hmck sync --json             # 给脚本/agent 解析（含 device_id、devices）
 hmck sync push               # 加密推到 GitHub 私有仓库；第一次自动建 <用户名>/hmck-config
 hmck sync pull               # 另一台机器拉下来（--dry-run 只看会改什么）
 hmck sync add ~/.npmrc       # 额外同步一个文件；hmck sync rm 去掉
 hmck sync off                # 本机忘掉仓库和密钥，远端数据不动
 ```
 
-TUI 列表上按 `y` 就是同一套能力的同步页：看状态、推送/拉取/预览、强制覆盖、`sync add` 的路径、
-忘掉本机密钥；本机没记住密钥时密码直接在页面里掩码输入（首次推送输两遍），只用于这一次请求。
-agent 仍然走上面的 CLI，不要启动 TUI。
+TUI 列表上按 `y` 就是同一套能力的同步页：看状态、推送/拉取/预览、刷新设备列表、强制覆盖、
+`sync add` 的路径、忘掉本机密钥；本机没记住密钥时密码直接在页面里掩码输入（首次推送输两遍），
+只用于这一次请求。agent 仍然走上面的 CLI，不要启动 TUI。
+设备表：每台机器有自己的固定 `device_id`（sync.json 里的 `device_id`），主机名、系统、最近一次
+push/pull 时间跟着加密数据走；`hmck sync --json` 的 `devices` 就是它，本机那条的 id 等于
+`device_id`。设备表只说明谁参与同步，不代表该设备现在在线。
 登录借 gh CLI（`gh auth token`），没登录先让用户跑 `gh auth login`；hmck 不保存 GitHub 凭据。
 本机没装或没登录 gh 时，同步页最前面会先给「安装 GitHub CLI」「登录 GitHub CLI」——安装走
 winget / scoop / choco / Homebrew / apt / dnf / pacman，没有包管理器就打开 cli.github.com，
