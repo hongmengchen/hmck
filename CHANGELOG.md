@@ -2,6 +2,17 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.11.1] - 2026-11-26
+
+### 新增
+
+- 自己的工具能在右侧半屏里打开：列表里选中 kube-token / npm-token / argo-token 按 `p`，hmck 在右边起一份它的 TUI（伪终端 + 虚拟终端，逐格接回屏幕），左边列表照样能用；`tab` 在两边切换键盘，`esc` 或再按 `p` 收起并结束它。`enter` 仍是全屏打开，两种进法随时选。终端至少 80 列 × 16 行才摆得下两栏，太窄时提示里不出现 `p`；Windows 上暂时只有全屏
+
+### 变更
+
+- 底部提示跟着选中的那一行走，不再摆按了没反应的键：官方 CLI 上没有「启动」，没装的不摆「升级」，半屏开着时只留「tab 回到列表 / 输入直接发给它」。`enter` 在官方 CLI（glab / kubectl / argocd）上改成打开信息页——它们不带参数只会打印帮助再退出，以前按下去看着像什么都没发生
+- 列表里 PATH 上别人的那份（brew 的 glab）跟 hmck 自己装的显示成一个样子：`✓ 1.130.0`，不再是灰色的「· PATH 上的 1.130.0」。版本号问的是那份 CLI 自己（`glab version`、`kubectl version --client`、`argocd version --client`），「是哪一份」只在第二行说明；brew 那边落后也不写成 ↑——hmck 替它升不了，不拿按不动的提示打扰用户
+
 ## [0.11.0] - 2026-11-26
 
 ### 新增

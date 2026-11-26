@@ -108,6 +108,8 @@ type tuiModel struct {
 	catGen int         // 目录也认代次，连按 r 不会让旧结果盖掉新的
 
 	sync syncView // 多端同步页
+
+	pane *pane // 右侧半屏跑着的工具 TUI；nil 表示没开
 }
 
 type syncMode int
@@ -710,12 +712,58 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.syncPaneSize()
 
 	case tea.KeyMsg:
+		// 右边那半屏开着的时候，键盘先问它：专注时除了 tab 全都原样转给子进程，
+		// 不专注时 tab 进去、esc 收起
+		if m.pane != nil && m.state == list {
+			if m.pane.focused {
+				if msg.String() == "tab" {
+					m.pane.focused = false
+					return m, nil
+				}
+				m.pane.write(paneKeyBytes(msg))
+				return m, nil
+			}
+			switch msg.String() {
+			case "tab":
+				// 已经退出的面板没什么可输入的，留在那儿给人看完按 p 收
+				if !m.pane.exited {
+					m.pane.focused = true
+				}
+				return m, nil
+			case "esc":
+				m.closePane()
+				return m, nil
+			}
+		}
 		if msg.String() == "ctrl+c" {
+			m.closePane()
 			return m, tea.Quit
 		}
-		return m.handleKey(msg)
+		model, cmd := m.handleKey(msg)
+		tm := model.(tuiModel)
+		// 去了别的页面就不再需要半屏；不给它留在后台偷偷跑
+		if tm.state != list {
+			tm.closePane()
+		}
+		return tm, cmd
+
+	case paneOutputMsg:
+		if m.pane == nil || msg.p != m.pane {
+			return m, nil
+		}
+		return m, m.pane.wait()
+
+	case paneExitMsg:
+		if m.pane == nil || msg.p != m.pane {
+			return m, nil
+		}
+		m.pane.exited = true
+		m.pane.focused = false
+		m.pane.err = msg.err
+		return m, nil
 
 	case spinner.TickMsg:
 		if !m.animating() {
@@ -1066,17 +1114,7 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if !m.localReady || len(m.states) == 0 {
 				return m, nil
 			}
-			st := m.states[m.cursor]
-			if st.Tool.Self {
-				// 选到自己时不启动自己，只走升级/已是最新
-				return m.startInstall(st)
-			}
-			// 本机上有哪份就启动哪份：hmck 装的那份优先，其次才是 PATH 上
-			// 别人装的（brew 的 glab）。启动永远不会顺手装一份新的
-			if bin := toolCopy(st); bin != "" {
-				return m, launchCmd(st.Tool, bin)
-			}
-			return m.startInstall(st)
+			return m.enterSelected()
 		case "u":
 			if m.localReady && len(m.states) > 0 {
 				return m.upgradeOne(m.states[m.cursor])
@@ -1116,6 +1154,20 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m.startInfo()
+		case "p":
+			// 右侧半屏：选中自己的工具时开/关；选中别的行就当没这个键，
+			// 提示栏也不会摆它
+			if !m.localReady || len(m.states) == 0 {
+				return m, nil
+			}
+			st := m.states[m.cursor]
+			if m.pane != nil {
+				m.closePane()
+				return m, nil
+			}
+			if st.Tool.TUI && toolCopy(st) != "" {
+				return m.openPane(st)
+			}
 		case "d":
 			if !m.localReady || len(m.states) == 0 {
 				return m, nil
@@ -1138,6 +1190,7 @@ func (m tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r":
 			return m.refresh()
 		case "q", "esc":
+			m.closePane()
 			return m, tea.Quit
 		}
 
@@ -1984,6 +2037,37 @@ func (m tuiModel) startInfo() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// enterSelected 是 enter 这一下的全部去向，和 enterHint 一一对应：
+// 自己的 TUI 才「打开」，官方 CLI 开信息页（无参跑一下只会打印帮助再弹回来，
+// 看着像没反应），本机什么都没有的才装
+func (m tuiModel) enterSelected() (tea.Model, tea.Cmd) {
+	st := m.states[m.cursor]
+	// 全屏和半屏是两种进法：整块终端交给它之前，先把右边那份收掉，
+	// 免得同一个工具在两个终端里各跑一份
+	m.closePane()
+	switch {
+	case st.Tool.Self:
+		// 选到自己时不启动自己，只走升级/已是最新
+		return m.startInstall(st)
+	case st.Tool.TUI:
+		if bin := toolCopy(st); bin != "" {
+			return m, launchCmd(st.Tool, bin)
+		}
+		return m.startInstall(st)
+	case st.Missing() && len(st.Foreign) == 0:
+		return m.startInstall(st)
+	case toolKind(st.Tool) == kindOfficial:
+		return m.startInfo()
+	default:
+		// 本机上有哪份就启动哪份：hmck 装的那份优先，其次才是 PATH 上
+		// 别人装的（brew 的 glab）。启动永远不会顺手装一份新的
+		if bin := toolCopy(st); bin != "" {
+			return m, launchCmd(st.Tool, bin)
+		}
+		return m.startInstall(st)
+	}
+}
+
 // startUninstall 按 d 之后先进确认页：删哪一份、留哪一份，看完把工具名敲一遍才动手。
 // hmck 目录里没有这个工具就直接说清楚，不开一个空确认页
 func (m tuiModel) startUninstall(st toolState) (tea.Model, tea.Cmd) {
@@ -2061,6 +2145,12 @@ func (m tuiModel) View() string {
 	var body string
 	switch m.state {
 	case list:
+		if m.pane != nil {
+			if l, ok := m.paneLayout(); ok {
+				body = m.viewSplit(l)
+				break
+			}
+		}
 		body = m.viewList()
 	case working:
 		body = m.viewWorking()
@@ -2097,17 +2187,28 @@ func (m tuiModel) withLogo(lines ...string) string {
 }
 
 func (m tuiModel) viewList() string {
+	hints := m.listHints()
+	tail := "\n" + hints
+	// 提示行不在列表本体里：并排半屏时要横跨整屏，这里统一接在下面
+	hintLines := strings.Count(hints, "\n") + 1
 	body := m.viewListBody(false, 0)
-	if m.height <= 0 || strings.Count(body, "\n")+3 <= m.height {
-		return body
+	if m.height <= 0 || strings.Count(body, "\n")+hintLines+2 <= m.height {
+		return body + tail
 	}
 	// 终端不够高：先换成「一行一个工具」的紧凑版
 	compact := m.viewListBody(true, 0)
-	if strings.Count(compact, "\n")+3 <= m.height {
-		return compact
+	if strings.Count(compact, "\n")+hintLines+2 <= m.height {
+		return compact + tail
 	}
-	// 还是放不下（工具很多）：只画光标附近那几行，标题和提示始终留在屏上
-	return m.viewListBody(true, max(m.height-2-m.listFixedLines(), 1))
+	// 还是放不下（工具很多）：只画光标附近那几行，标题和提示始终留在屏上。
+	// 窗口行数是估的（「上面/下面还有」多占一行），算完再按实际行数收一收
+	budget := max(m.height-2-m.listFixedLines(), 1)
+	body = m.viewListBody(true, budget)
+	if limit := m.height - 4 - hintLines; strings.Count(body, "\n") > limit && budget > 1 {
+		budget = max(budget-(strings.Count(body, "\n")-limit), 1)
+		body = m.viewListBody(true, budget)
+	}
+	return body + tail
 }
 
 // listFixedLines 是列表区以外固定要占的行：招牌 3 行、同步/错误提示、
@@ -2127,9 +2228,70 @@ func (m tuiModel) listFixedLines() int {
 	return n
 }
 
+// selectedState 是光标所在那行；列表还没读出来时没有选中项
+func (m tuiModel) selectedState() (toolState, bool) {
+	if !m.localReady || len(m.states) == 0 || m.cursor < 0 || m.cursor >= len(m.states) {
+		return toolState{}, false
+	}
+	return m.states[m.cursor], true
+}
+
+// enterHint 说 enter 这一下会做什么，跟着选中的行变
+func enterHint(st toolState) string {
+	switch {
+	case st.Tool.Self:
+		return "升级"
+	case st.Tool.TUI:
+		if toolCopy(st) != "" {
+			return "打开"
+		}
+		return "安装"
+	case st.Missing() && len(st.Foreign) == 0:
+		return "安装"
+	case toolKind(st.Tool) == kindOfficial:
+		// glab / kubectl / argocd 无参只会打印帮助再退出，按下去看着像没反应；
+		// 它们的用处在这里是「看它现在什么样」，所以 enter 开信息页
+		return "信息"
+	default:
+		return "启动"
+	}
+}
+
+// listHints 只列选中这一行真能做的事：官方 CLI 不摆「启动」、没装的不摆「升级」、
+// PATH 上别人那份不归 hmck 删就不摆「卸载」，免得按下去没反应
 func (m tuiModel) listHints() string {
-	return m.viewHints("↑↓", "选择", "enter", "启动/安装", "n", "工具目录", "u", "升级", "U", "全部更新",
-		"i", "信息", "g", "更新日志", "y", "同步", "d", "卸载", "s", "装 skill", "r", "重新检查", "q", "退出")
+	// 半屏开着且键盘在它那边：列表的键都发不过去，就只留怎么回来
+	if m.pane != nil && m.pane.focused {
+		return m.viewHints("tab", "回到列表", "输入", "直接发给 "+m.pane.tool.Key)
+	}
+	pairs := []string{"↑↓", "选择"}
+	st, ok := m.selectedState()
+	if !ok {
+		return m.viewHints(append(pairs, "n", "工具目录", "y", "同步", "r", "重新检查", "q", "退出")...)
+	}
+	pairs = append(pairs, "enter", enterHint(st))
+	switch {
+	case m.pane != nil && m.pane.exited:
+		pairs = append(pairs, "p", "收起")
+	case m.pane != nil:
+		pairs = append(pairs, "tab", "到右侧", "p", "收起")
+	case st.Tool.TUI && toolCopy(st) != "" && m.paneFits():
+		// 终端太窄、或者平台没有伪终端时，不摆这个按不动的键
+		pairs = append(pairs, "p", "右侧打开")
+	}
+	if st.Behind() || (st.Latest != "" && m.staged[st.Tool.Key] == st.Latest) {
+		pairs = append(pairs, "u", "升级")
+	}
+	if m.hasBehind() {
+		pairs = append(pairs, "U", "全部更新")
+	}
+	pairs = append(pairs, "i", "信息", "g", "更新日志")
+	// 只有 hmck 自己装的那份才谈得上卸载；PATH 上别人装的归 brew / 系统管
+	if managedCopy(st.Tool) != "" {
+		pairs = append(pairs, "d", "卸载")
+	}
+	return m.viewHints(append(pairs, "n", "工具目录", "y", "同步", "s", "装 skill",
+		"r", "重新检查", "q", "退出")...)
 }
 
 // listRow 是紧凑列表里的一行：分组标题或某个工具
@@ -2224,7 +2386,6 @@ func (m tuiModel) viewListBody(compact bool, budget int) string {
 		}
 	}
 	b.WriteString("\n")
-	b.WriteString(m.listHints())
 	return b.String()
 }
 
@@ -2432,11 +2593,13 @@ func (m tuiModel) statusIcon(st toolState) (string, lipgloss.Style) {
 	case st.Installed == "" && st.CheckErr != "":
 		return "!", styles.Bad // 这台机器上装不了
 	case st.Installed == "" && len(st.Foreign) > 0:
-		// 用的是 PATH 上别人装的那份：版本刚好也是最新给个 ✓，否则按「不归 hmck 管」处理
-		if st.ForeignVer != "" && st.Latest != "" && !isNewer(st.Latest, st.ForeignVer) {
-			return "✓", styles.Good
+		// 用的是 PATH 上别人装的那份（brew 的 glab）：本机明明能跑，就跟 hmck 装的
+		// 一样给 ✓，版本号照常显示；「是哪一份」交给第二行说。它归 brew / 系统管，
+		// hmck 不能替它升级，所以这里不拿「有新版」打扰用户
+		if st.ForeignVer == "" {
+			return "·", styles.Dim
 		}
-		return "·", styles.Dim
+		return "✓", styles.Good
 	case st.Installed == "":
 		return "○", styles.Warn
 	case st.CheckErr != "":
@@ -2463,8 +2626,12 @@ func (m tuiModel) versionCell(st toolState) string {
 	}
 	switch {
 	case st.Installed == "" && st.ForeignVer != "":
-		// hmck 这边没装，但 PATH 上有一份能用的：写它是哪一版，别让人以为这台机器没有
-		return iconStyle.Render(icon) + " " + styleVerOld.Render("PATH 上的 "+st.ForeignVer)
+		// hmck 这边没装，但 PATH 上有一份能用的：跟已装的一样只写版本号，
+		// 版本号是从那份 CLI 自己问来的（glab version / argocd version --client）
+		return iconStyle.Render(icon) + " " + verStyle.Render(st.ForeignVer)
+	case st.Installed == "" && len(st.Foreign) > 0:
+		// 有一份，但问不出它的版本：只说清是哪一份
+		return iconStyle.Render(icon) + " " + styleVerOld.Render("PATH 上的那份")
 	case st.Installed == "":
 		return iconStyle.Render(icon) + " " + styleVerOld.Render("未安装")
 	case st.Latest == "":

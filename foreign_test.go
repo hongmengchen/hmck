@@ -10,10 +10,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// brew 装好、已经登录的 glab：hmck 只查看和启动它。
-// 按 enter 必须直接启动 PATH 上那份，不能顺手往 hmck 目录里再装一份——
-// 多出来的副本排在 PATH 前面，会把用户和 agent 一直在用的那份顶掉
-func TestEnterLaunchesForeignCopy(t *testing.T) {
+// 官方 CLI（glab / kubectl / argocd）无参跑一下只会打印帮助再退出，
+// 按 enter 原来看着就像没反应：现在进信息页，提示栏也只写「信息」
+func TestEnterOnOfficialCLIOpensInfo(t *testing.T) {
 	m := newTUIModel()
 	m.state = list
 	m.localReady = true
@@ -24,11 +23,35 @@ func TestEnterLaunchesForeignCopy(t *testing.T) {
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	got := updated.(tuiModel)
-	if got.state != list {
-		t.Fatalf("按 enter 不该离开列表去安装: state=%v workText=%q", got.state, got.workText)
+	if got.state != infoPage {
+		t.Fatalf("官方 CLI 按 enter 应当开信息页: state=%v workText=%q", got.state, got.workText)
 	}
-	if cmd == nil {
-		t.Fatal("按 enter 应当启动 PATH 上那份 glab")
+	if cmd != nil {
+		t.Error("进信息页不该再跑命令")
+	}
+	if hint := plainText(m.listHints()); !strings.Contains(hint, "enter 信息") {
+		t.Errorf("提示栏应当写 enter 信息:\n%s", hint)
+	}
+}
+
+// 自己的小工具（带 TUI）按 enter 还是直接打开，并且提示栏给出「打开」
+func TestEnterOpensOwnTUI(t *testing.T) {
+	m := newTUIModel()
+	m.state = list
+	m.localReady = true
+	m.states = []toolState{{
+		Tool:      tool{Key: "kube-token", Binary: "kube-token", Kind: kindOwn, TUI: true},
+		Path:      "/opt/homebrew/bin/kube-token",
+		Installed: "0.8.0",
+	}}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := updated.(tuiModel)
+	if got.state != list || cmd == nil {
+		t.Fatalf("自己的工具按 enter 应当直接打开: state=%v cmd=%v", got.state, cmd)
+	}
+	if hint := plainText(m.listHints()); !strings.Contains(hint, "enter 打开") {
+		t.Errorf("提示栏应当写 enter 打开:\n%s", hint)
 	}
 }
 

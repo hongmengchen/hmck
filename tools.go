@@ -45,6 +45,9 @@ type tool struct {
 	StatusSource string `json:"-"` // 状态怎么读：glab（默认，看登录）/ kubectl（看集群）/ argocd（看 Argo token）
 	Custom       bool   `json:"-"` // 来自本机配置，不是内置
 	Self         bool   `json:"-"` // hmck 自己：路径取当前可执行文件，版本用内置的
+	// TUI 表示无参运行就进它自己的全屏界面（kube-token、npm-token、argo-token）。
+	// glab / kubectl / argocd 这类官方 CLI 无参只会打印帮助再退出，不算
+	TUI bool `json:"-"`
 }
 
 // 列表里的三栏：别人的官方 CLI、我们自己的小工具、本机自己加的工具。
@@ -96,6 +99,7 @@ var registry = []tool{
 		Repo:   "hongmengchen/kube-token",
 		Binary: "kube-token",
 		Kind:   kindOwn,
+		TUI:    true, // 无参运行就进它自己的界面
 		Platforms: []string{
 			"darwin/amd64", "darwin/arm64",
 			"linux/amd64", "linux/arm64",
@@ -115,6 +119,7 @@ var registry = []tool{
 		Repo:   "hongmengchen/npm-token",
 		Binary: "npm-token",
 		Kind:   kindOwn,
+		TUI:    true, // 无参运行就进它自己的界面
 		Platforms: []string{
 			"darwin/amd64", "darwin/arm64",
 			"linux/amd64", "linux/arm64",
@@ -136,6 +141,7 @@ var registry = []tool{
 		Repo:   "hongmengchen/argo-token",
 		Binary: "argo-token",
 		Kind:   kindOwn,
+		TUI:    true, // 无参运行就进它自己的界面
 		Platforms: []string{
 			"darwin/amd64", "darwin/arm64",
 			"linux/amd64", "linux/arm64",

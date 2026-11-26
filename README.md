@@ -61,7 +61,7 @@ $ hmck
 │   ▌        管理这些命令行小工具，包括它自己                                  ~/.local/bin/hmck
 │ ▟▛ ▗▄▖  hongmengchen/hmck
 
-  ↑↓ 选择  ·  enter 启动/安装  ·  n 工具目录  ·  u 升级  ·  U 全部更新  ·  i 信息  ·  g 更新日志
+  ↑↓ 选择  ·  enter 打开  ·  p 右侧打开  ·  n 工具目录  ·  u 升级  ·  U 全部更新  ·  i 信息  ·  g 更新日志
   d 卸载  ·  s 装 skill  ·  r 重新检查  ·  q 退出
 ```
 
@@ -83,7 +83,9 @@ $ hmck
 
 第一行最右边是**上一次版本更新时间**：hmck 自己装上/升级成功时记进 `state.json`（和 `config.json` 同目录），显示成「刚刚更新 / 3 小时前更新 / 12 天前更新」，超过一个月给日期。不是 hmck 装的（手动替换、从别处拷过来的），就用二进制文件的修改时间兜底，所以每个装好的工具都有时间可看。
 
-`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`n` 打开工具目录，挑一个 `enter` 加入并安装（已加入的直接装/升级），目录里按 `a` 才是按仓库新增，填仓库（`owner/name` 或 GitHub 链接）、key 和说明，`enter` 存进配置并直接开始安装；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`i` 看当前状况（glab 的登录状态、kubectl 的集群状态、argo-token 的 token 还能不能用都在这一页）；`g` 看选中工具的更新日志；`y` 打开[多端同步](#多端同步)页；`d` 卸载；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
+`enter` 和底部的提示都跟着选中的那一行走，不会摆按了没反应的键：自己的工具（kube-token / npm-token / argo-token）是**打开**，整块终端交给它的 TUI，用完退出就回到 hmck；没装的是**安装**；选到 hmck 自己时是**升级**；官方 CLI（glab / kubectl / argocd）是**信息**——它们不带参数只会打印帮助再退出，以前按下去看着像什么都没发生，现在直接进信息页。`n` 打开工具目录，挑一个 `enter` 加入并安装（已加入的直接装/升级），目录里按 `a` 才是按仓库新增，填仓库（`owner/name` 或 GitHub 链接）、key 和说明，`enter` 存进配置并直接开始安装；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；`i` 看当前状况（glab 的登录状态、kubectl 的集群状态、argo-token 的 token 还能不能用都在这一页）；`g` 看选中工具的更新日志；`y` 打开[多端同步](#多端同步)页；`d` 卸载；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
+
+自己的工具还能**在右边半屏里打开**：按 `p`，hmck 在列表右边开一栏跑它的 TUI，左边列表照样在，可以边看边选下一个；`tab` 把键盘在两边换，`esc` 或再按 `p` 收起（子进程一起结束）。它的界面是在一个伪终端里跑的，hmck 把屏幕逐格接过来画，所以颜色、光标都在，输入也原样发过去；工具退出后面板留着显示最后画面，按 `p` 收起。终端至少 80 列 × 16 行才摆得下两栏，太窄时提示里不出现 `p`，`enter` 全屏照常；Windows 上暂时只有全屏。
 
 终端不高时列表自动换成**紧凑版**：一个工具一行，招牌和分隔线收起来，标题、同步状态和按键提示始终留在屏幕上。工具多到一屏还放不下时，只画光标附近那几行，上下注明「上面/下面还有 N 行」。
 
@@ -255,7 +257,7 @@ hmck sync add ~/.npmrc    # 额外同步一个文件
 
 安装位置：统一放在 `~/.local/bin`（Windows 是 `%USERPROFILE%\.local\bin`）；hmck 自己装在系统目录（如 `/usr/local/bin`）时，新工具跟着它放在同一目录。工具已经在 PATH 里就在原位置升级。内置工具的 release 都带校验文件（`checksums.txt`，argo-cd 是 `cli_checksums.txt`），安装和升级会校验 SHA-256。
 
-glab 和 kubectl 是个例外（brew / apt 装的 glab、Docker Desktop 自带的 kubectl 太多）：hmck 只认自己目录里的那一份，不接管 PATH 上别人装的副本——卡片上会注明「PATH 上已有一份」，`hmck uninstall glab` 也只删自己那份。按 `enter` 启动的就是那一份（hmck 自己装过的话它排在前面，没有也不另装第二个副本——两个 glab 并存会把人和 agent 一直在用的那份顶掉）；按 `u` 只说明它归谁管、该用谁升级。状态照样读得出来：glab 看登录，kubectl 看集群。卸不卸由你按 `d` 决定。
+glab 和 kubectl 是个例外（brew / apt 装的 glab、Docker Desktop 自带的 kubectl 太多）：hmck 只认自己目录里的那一份，不接管 PATH 上别人装的副本——卡片上会注明「PATH 上已有一份」，`hmck uninstall glab` 也只删自己那份。按 `enter` 打开的是信息页——版本、位置、登录状态，看的就是它这一份（hmck 自己装过的话它排在前面，没有也不另装第二个副本——两个 glab 并存会把人和 agent 一直在用的那份顶掉）；要跑命令用 `hmck run glab`，按 `u` 只说明它归谁管、该用谁升级。状态照样读得出来：glab 看登录，kubectl 看集群。卸不卸由你按 `d` 决定。
 
 从旧版升级（Windows 以前装在 `%LOCALAPPDATA%\<tool>`）时，第一次运行新版 hmck 会把二进制搬到统一目录，并把用户 PATH 里的旧目录换成新目录。配置不在安装目录里，`%AppData%\hmck`、`%AppData%\kube-token`、`~/.npmrc` 和 `~/.claude/skills` 都原样保留，不需要重新配置。
 

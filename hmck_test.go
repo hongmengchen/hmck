@@ -416,6 +416,10 @@ func TestVersionCell(t *testing.T) {
 		{"可更新", toolState{Path: "/tmp/tool-a", Installed: "0.4.2", Latest: "0.4.3"}, "↑ 0.4.2 → 0.4.3"},
 		{"未安装", toolState{Latest: "0.1.0"}, "○ 未安装"},
 		{"只查到已装版本", toolState{Path: "/tmp/tool-a", Installed: "0.1.0"}, "✓ 0.1.0"},
+		// PATH 上别人的那份（brew 的 glab）跟已装的显示一样：✓ + 它自己的版本号，
+		// 哪怕 brew 那边落后了也不写成 ↑——hmck 替它升不了
+		{"PATH 上的那份", toolState{Foreign: []string{"/opt/homebrew/bin/glab"}, ForeignVer: "1.130.0", Latest: "1.133.0"}, "✓ 1.130.0"},
+		{"PATH 上那份但读不到版本", toolState{Foreign: []string{"/opt/homebrew/bin/glab"}}, "· PATH 上的那份"},
 	}
 	for _, c := range cases {
 		got := plainText(m.versionCell(c.st))
