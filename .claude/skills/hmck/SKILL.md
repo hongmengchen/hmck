@@ -1,6 +1,6 @@
 ---
 name: hmck
-description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、argo-token、glab、kubectl、argocd 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态和集群连通性、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「卸载某个工具 / 卸载 hmck」「自动更新」「多端同步配置 / hmck sync」「新增一个工具让 hmck 管理」「hmck 都能装什么 / 工具目录」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
+description: 管理这台机器上的一组命令行小工具（kube-token、npm-token、argo-token、glab、kubectl、argocd 及以后新增的，也包括 hmck 自己），看已装/最新版本、登录状态、集群连通性、Argo token 还能不能用、一键安装或升级、直接启动、卸载，并给每个工具装 agent skill。当用户说「hmck」「升级我的小工具」「hmck 怎么升级自己」「看看有没有新版本」「装一下 kube-token / npm-token / glab / kubectl」「glab 登没登录」「kubectl 连不连得上 / 当前 context 是什么」「Argo token 还有效吗 / argocd 登录状态」「卸载某个工具 / 卸载 hmck」「自动更新」「多端同步配置 / hmck sync」「新增一个工具让 hmck 管理」「hmck 都能装什么 / 工具目录」「给 agent 配置 skill」时使用。包含 hmck 的 CLI/TUI 用法、信息页、卸载、自我升级、自动下载/安装开关、自定义工具接入方式与安全约束。
 ---
 
 # hmck
@@ -10,7 +10,7 @@ description: 管理这台机器上的一组命令行小工具（kube-token、npm
 **自己的工具**（kube-token、npm-token、argo-token、hmck，除了版本还能直接打开用）、
 **自己加的**（本机 `hmck add` 进来的）；`hmck list --json` 每条带 `kind`（`official` / `own` / `added`）。
 它知道每个工具的已安装版本、最新版本、安装路径，能安装、升级、直接启动、卸载，
-还会顺手把各工具的 agent skill 刷新到全局目录；对 glab 这类工具能读出登录状态，对 kubectl 能读出当前 context 和集群连通性。
+还会顺手把各工具的 agent skill 刷新到全局目录；对 glab 这类工具能读出登录状态，对 kubectl 能读出当前 context 和集群连通性，对 argo-token 能拿官方 argocd CLI 验已有 token 还能不能用。
 
 **agent 一律走 CLI，不要启动 TUI。** `hmck`（无参数）会进全屏 TUI，需要真终端；
 CLI 的每个动作都有对应命令，输出也可以 `--json`。
@@ -19,7 +19,9 @@ CLI 的每个动作都有对应命令，输出也可以 `--json`。
 
 1. **不要回显任何 token。** hmck 本身不碰密钥，但它管理的工具会；调用它们时输出里只会有掩码。
    `hmck info glab` 只跑 `glab auth status`，输出里也只有主机、账号、凭证来源，不会打印 token；
-   `hmck info kubectl` 只跑 `kubectl config view --minify` 和 `kubectl version -o json`，不读 kubeconfig 里的证书和 token。
+   `hmck info kubectl` 只跑 `kubectl config view --minify` 和 `kubectl version -o json`，不读 kubeconfig 里的证书和 token；
+   `hmck info argo-token` 只跑 `argocd account get-user-info`（只读），验证时 token 只走子进程的
+   `ARGOCD_AUTH_TOKEN` 环境变量（不进参数、不打印），`--config` 指向临时空路径，不碰 `argocd login` 的 context。
 2. **不要擅自改用户的真实配置。** `~/.npmrc`、`~/.kube/config` 的写入交给 kube-token /
    npm-token 自己做（它们会自动备份、复验、必要时还原），agent 不要手改文件；
    argo-token 的 token 在 `~/.argocd/token`（0600），配置和 token 都交给它的 TUI / `set` 写，agent 不要 `cat`。
@@ -40,16 +42,21 @@ hmck catalog           # 在线工具目录：hmck 能装什么，带本机状�
 hmck catalog --json    # 给脚本/agent 解析
 hmck info glab         # 一个工具的详情，包括 glab 的登录状态（--json 给脚本）
 hmck info kubectl      # 当前 context、API server、服务端版本、连不连得上
+hmck info argo-token   # Argo 服务器、token 还在不在、官方 argocd CLI 说它还能不能用
 hmck version
 ```
 
 `hmck info <tool>` 是「这个工具现在怎么样」：先一行总结（`✓ 已登录 alice@git.example.com`、
-`✓ 已连通 eks-prod`、`○ 还没登录`、`✓ 已是最新`、`可升级 1.2.3`），再列字段。glab 这类能读登录状态的工具，
+`✓ 已连通 eks-prod`、`✓ token 可用（alice）`、`○ 还没登录`、`✓ 已是最新`、`可升级 1.2.3`），再列字段。glab 这类能读登录状态的工具，
 字段是：主机、账号、凭证来源（系统钥匙串 / 配置文件 / 环境变量）、传输（`git ssh · API https`）、
 REST API、GraphQL、其他登录过的主机；kubectl 的字段是：当前 context、集群、API server、
 服务端版本、连通性，连不上时还有一句说明（token 过期 / 超时 / 地址不通）；
+argo-token 的字段是：服务器、账号、签发方、token 文件（只报路径和有没有，不报内容）、grpc-web、
+验证结果——`✓ token 可用` / `! token 不可用`（服务器拒了，重新运行 argo-token）/ `验证没通过：连接超时 / 连不上服务器` /
+`没跑：本机没有 argocd CLI`（`hmck install argocd` 之后就能验）；
 之后每个工具都有版本、最新、位置、更新时间、PATH 上的其他副本和仓库。
-hmck 只跑 `glab auth status`、`kubectl config view --minify`、`kubectl version -o json`，不会读 token、证书本身。
+hmck 只跑 `glab auth status`、`kubectl config view --minify`、`kubectl version -o json` 和
+`argocd account get-user-info`，不会读 token、证书本身。
 
 `list --json` 每条形如：
 
@@ -171,14 +178,18 @@ GitLab 工具如 glab 用 GitLab API）；
 hmck sync                    # 状态：仓库、是否已记住密钥、上次推送/拉取、设备、同步清单
 hmck sync --json             # 给脚本/agent 解析（含 device_id、devices）
 hmck sync push               # 加密推到 GitHub 私有仓库；第一次自动建 <用户名>/hmck-config
-hmck sync pull               # 另一台机器拉下来（--dry-run 只看会改什么）
+hmck sync pull               # 另一台机器拉下来（--dry-run 逐文件预览文本差异）
 hmck sync add ~/.npmrc       # 额外同步一个文件；hmck sync rm 去掉
 hmck sync off                # 本机忘掉仓库和密钥，远端数据不动
 ```
 
-TUI 列表上按 `y` 就是同一套能力的同步页：看状态、推送/拉取/预览、刷新设备列表、强制覆盖、
+TUI 列表上按 `y` 就是同一套能力的同步页：看状态、推送/拉取/预览、刷新设备列表、管理各工具同步、强制覆盖、
 `sync add` 的路径、忘掉本机密钥；本机没记住密钥时密码直接在页面里掩码输入（首次推送输两遍），
-只用于这一次请求。agent 仍然走上面的 CLI，不要启动 TUI。
+只用于这一次请求。逐工具开关在首次连接前也能设置；偏好只保存在本机 `sync.json`，关闭后本机双向跳过该工具，
+远端已有数据保留。agent 仍然走上面的 CLI，不要启动 TUI。
+`hmck sync pull --dry-run` 和 TUI 预览逐文件显示文本差异，不写本机文件或同步状态；TUI 预览页可滚动。
+常见凭据文件及含疑似凭据的文件不展示差异内容，二进制文件也不展示内容；终端控制字符会转义。
+本机冲突会提示普通 pull 将拒绝覆盖，需要明确加 `--force` 才会应用。
 设备表：每台机器有自己的固定 `device_id`（sync.json 里的 `device_id`），主机名、系统、最近一次
 push/pull 时间跟着加密数据走；`hmck sync --json` 的 `devices` 就是它，本机那条的 id 等于
 `device_id`。设备表只说明谁参与同步，不代表该设备现在在线。
@@ -189,6 +200,9 @@ winget / scoop / choco / Homebrew / apt / dnf / pacman，没有包管理器就�
 加密是 PBKDF2-HMAC-SHA256（60 万次）+ AES-256-GCM，GitHub 上只有密文。
 同步内容：hmck 的 `config.json` / `tools.json`，各工具声明的配置（kube-token、npm-token、
 argo-token 的配置和 `~/.argocd/token`），以及用户 `sync add` 的路径。
+跨系统只带数据本身：配置里的路径字段（argo-token 的 `token_file`、npm-token 的 `file`）
+推上去写成 `home:…` / `config:…`，拉下来再展开成本机路径；纯本机的东西（npm-token 的
+`updated_at`、argo-token 生成的 `~/.argocd/env`）不同步。
 
 - **保存后自动推**：`hmck run <工具>` 退出后、TUI 改完配置或增删工具后自动推一次，没变就跳过；
   失败只提示，不影响原命令退出码。同步没开启时静默。
@@ -265,7 +279,8 @@ hmck rm my-tool                      # 只删自定义工具
 **备选：写进内置列表。** 在 `tools.go` 的 `registry` 加一条，发新版 hmck。
 内置工具 key 优先于自定义配置，不能被 `hmck add` 覆盖、也不能 `hmck rm`。
 发布在 GitLab 的加 `Host: "gitlab"`；资产名不规范用 `Asset` 模板、压缩包开 `Archive`；
-只接管自己装的那份用 `OwnDir`；能读登录状态的用 `Status`（目前只有 glab）；
+只接管自己装的那份用 `OwnDir`；能读状态的用 `Status`，再看 `StatusSource` 选怎么读
+（不写是 glab 那种登录状态，`kubectl` 看集群，`argocd` 拿官方 CLI 验 token，如 argo-token）；
 `Kind` 决定列表归到哪一栏：别人的官方 CLI 写 `kindOfficial`，自己的小工具写 `kindOwn`
 （kube-token / npm-token / argo-token / hmck），本机 `hmck add` 的自动算 `kindAdded`。
 

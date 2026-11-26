@@ -1,6 +1,10 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -276,5 +280,300 @@ func TestKubeInfo(t *testing.T) {
 	}
 	if strings.Contains(joined, "should-not-be-read") || strings.Contains(joined, "token") {
 		t.Errorf("信息里不该出现 token: %s", joined)
+	}
+}
+
+// ---------- Argo CD 状态 ----------
+
+func TestParseArgoUserInfo(t *testing.T) {
+	cases := []struct {
+		name   string
+		out    string
+		login  bool
+		user   string
+		issuer string
+		answer bool
+	}{
+		{"登录成功", "Logged In: true\nUsername: alice\nIssuer: https://dex.example.com\nGroups: dev,ops\n", true, "alice", "https://dex.example.com", true},
+		{"退出码 0 但没登录", "Logged In: false\n", false, "", "", true},
+		{"缩进和空行", "\n  Logged In: true\n  Username: bob\n", true, "bob", "", true},
+		{"不是这个命令的输出", "rpc error: something\n", false, "", "", false},
+		{"空输出", "", false, "", "", false},
+	}
+	for _, c := range cases {
+		login, user, issuer, answer := parseArgoUserInfo(c.out)
+		if login != c.login || user != c.user || issuer != c.issuer || answer != c.answer {
+			t.Errorf("%s: got (%v,%q,%q,%v), want (%v,%q,%q,%v)",
+				c.name, login, user, issuer, answer, c.login, c.user, c.issuer, c.answer)
+		}
+	}
+}
+
+func TestArgoConnectNote(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"rpc error: code = Unauthenticated desc = invalid session: signature is invalid\n", "服务器不认这个 token（重新运行 argo-token 换一个）"},
+		{"error: context deadline exceeded\n", "连接超时（检查网络或 VPN）"},
+		{"rpc error: code = Unavailable desc = connection refused\n", "连不上服务器（检查地址、网络或 VPN）"},
+		{"x509: certificate signed by unknown authority", "TLS 握手失败（证书或代理）"},
+		{"something else entirely", "something else entirely"},
+	}
+	for _, c := range cases {
+		if got := argoConnectNote(c.in); got != c.want {
+			t.Errorf("argoConnectNote(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	long := strings.Repeat("x", 200)
+	if got := argoConnectNote("error: " + long); len([]rune(got)) > 81 {
+		t.Errorf("长报错要压短: %d", len([]rune(got)))
+	}
+}
+
+func TestArgoServerHost(t *testing.T) {
+	cases := map[string]string{
+		"https://argocd.example.com":  "argocd.example.com",
+		"https://argocd.example.com/": "argocd.example.com",
+		"http://127.0.0.1:8080":       "127.0.0.1:8080",
+		"argocd.example.com:443":      "argocd.example.com:443",
+		"":                            "",
+	}
+	for in, want := range cases {
+		if got := argoServerHost(in); got != want {
+			t.Errorf("argoServerHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestArgoBadge(t *testing.T) {
+	cfg := &argoStatus{Configured: true, Server: "https://argocd.example.com", HasToken: true}
+
+	if head, kind := argoBadge(nil, false); kind != "warn" || !strings.Contains(head, "读不出") {
+		t.Errorf("nil: %q %q", head, kind)
+	}
+	if head, kind := argoBadge(&argoStatus{}, false); kind != "missing" || !strings.Contains(head, "还没配置") {
+		t.Errorf("没配置: %q %q", head, kind)
+	}
+	if head, kind := argoBadge(&argoStatus{}, true); kind != "missing" || !strings.Contains(head, "装好后") {
+		t.Errorf("没装也没配置: %q %q", head, kind)
+	}
+	if head, kind := argoBadge(&argoStatus{Configured: true}, false); kind != "warn" || !strings.Contains(head, "服务器地址") {
+		t.Errorf("缺地址: %q %q", head, kind)
+	}
+	noToken := &argoStatus{Configured: true, Server: "https://argocd.example.com"}
+	if head, kind := argoBadge(noToken, false); kind != "warn" || !strings.Contains(head, "没有 token") {
+		t.Errorf("没 token: %q %q", head, kind)
+	}
+
+	ok := *cfg
+	ok.LoggedIn, ok.Checkable, ok.Checked, ok.User = true, true, true, "alice"
+	if head, kind := argoBadge(&ok, false); head != "✓ token 可用（alice）" || kind != "ok" {
+		t.Errorf("可用: %q %q", head, kind)
+	}
+
+	if head, kind := argoBadge(cfg, false); kind != "warn" || !strings.Contains(head, "没装 argocd") {
+		t.Errorf("没法验证: %q %q", head, kind)
+	}
+
+	rejected := *cfg
+	rejected.Checkable, rejected.Checked = true, true
+	rejected.Note = "服务器不认这个 token（重新运行 argo-token 换一个）"
+	if head, kind := argoBadge(&rejected, false); kind != "warn" || !strings.Contains(head, "token 不可用") {
+		t.Errorf("被拒: %q %q", head, kind)
+	}
+
+	unreachable := *cfg
+	unreachable.Checkable = true
+	unreachable.Note = "连接超时（检查网络或 VPN）"
+	if head, kind := argoBadge(&unreachable, false); kind != "warn" || !strings.Contains(head, "验证没通过") {
+		t.Errorf("连不上: %q %q", head, kind)
+	}
+}
+
+// 信息页只报「有没有 token、存在哪」，token 本身一个字都不能出现
+func TestArgoInfoFields(t *testing.T) {
+	st := toolState{
+		Tool:      tool{Key: "argo-token", Repo: "hongmengchen/argo-token", Status: true, StatusSource: "argocd"},
+		Path:      "/home/alice/.local/bin/argo-token",
+		Installed: "0.1.1",
+		Latest:    "0.1.1",
+		Argo: &argoStatus{
+			Configured: true, Server: "https://argocd.example.com", Host: "argocd.example.com",
+			TokenFile: "/home/alice/.argocd/token", GRPCWeb: true, HasToken: true,
+			Checkable: true, Checked: true, LoggedIn: true, User: "alice",
+			Issuer: "https://dex.example.com",
+		},
+	}
+	info := toolInfoFor(st)
+	if info.Kind != "ok" || !strings.Contains(info.Headline, "token 可用") {
+		t.Errorf("headline = %q, kind = %q", info.Headline, info.Kind)
+	}
+	joined := fieldsText(info.Fields)
+	for _, want := range []string{"https://argocd.example.com", "alice", "https://dex.example.com", "已写入", "grpc-web", "开", "get-user-info"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("缺 %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "hmck-test-token") {
+		t.Errorf("信息里不该出现 token: %s", joined)
+	}
+}
+
+// argoSandbox 把家目录、配置目录、PATH 都换到临时目录：
+// 不碰真实的 ~/.argocd，也不会去连真实服务器
+type argoSandbox struct {
+	home, config, bin string
+}
+
+func newArgoSandbox(t *testing.T) *argoSandbox {
+	t.Helper()
+	sb := &argoSandbox{home: t.TempDir(), config: t.TempDir(), bin: t.TempDir()}
+	oldHome, oldCfg, oldExe := userHomeDir, userConfigDir, runningExe
+	userHomeDir = func() (string, error) { return sb.home, nil }
+	userConfigDir = func() (string, error) { return sb.config, nil }
+	runningExe = func() (string, error) { return filepath.Join(t.TempDir(), "hmck"), nil }
+	t.Cleanup(func() { userHomeDir, userConfigDir, runningExe = oldHome, oldCfg, oldExe })
+	t.Setenv("PATH", sb.bin)
+	t.Setenv("HOME", sb.home)
+	return sb
+}
+
+func (sb *argoSandbox) configure(t *testing.T, server, token string) {
+	t.Helper()
+	cfg := fmt.Sprintf(`{"server":%q,"token_file":%q,"grpc_web":true}`,
+		server, filepath.Join(sb.home, ".argocd", "token"))
+	writeFile(t, filepath.Join(sb.config, "argo-token", "config.json"), cfg)
+	if token != "" {
+		writeFile(t, filepath.Join(sb.home, ".argocd", "token"), token+"\n")
+	}
+}
+
+// fakeArgocd 在 PATH 上放一个假的 argocd，用它自己的命令行和验证输出冒充官方 CLI
+func (sb *argoSandbox) fakeArgocd(t *testing.T, logPath, body string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("假的 argocd 是 shell 脚本，Windows 上不跑")
+	}
+	writeFile(t, filepath.Join(sb.bin, "argocd"), "#!/bin/sh\n"+body)
+}
+
+// 配置会跟着 sync 跨机器走：Windows 写下的 `~\.argocd\token` 在 macOS 上
+// 也得落到本机的 ~/.argocd/token，不然明明有 token 也会说没有
+func TestArgoLocalTokenFile(t *testing.T) {
+	sb := newArgoSandbox(t)
+	want := filepath.Join(sb.home, ".argocd", "token")
+	for _, in := range []string{"", `~\.argocd\token`, "~/.argocd/token", "~/./.argocd/token"} {
+		if got := argoLocalTokenFile(in); got != want {
+			t.Errorf("argoLocalTokenFile(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := argoLocalTokenFile("~"); got != sb.home {
+		t.Errorf("~ 应该落到家目录: %q", got)
+	}
+	if got := argoLocalTokenFile("/etc/argo/token"); got != "/etc/argo/token" {
+		t.Errorf("别的路径原样保留: %q", got)
+	}
+}
+
+const argoTestToken = "hmck-test-token"
+
+func TestReadArgoStatusVerifiesTokenWithCLI(t *testing.T) {
+	sb := newArgoSandbox(t)
+	sb.configure(t, "https://argocd.example.com", argoTestToken)
+	logPath := filepath.Join(t.TempDir(), "calls.log")
+	sb.fakeArgocd(t, logPath, `
+{
+  echo "args:$*"
+  echo "token:${ARGOCD_AUTH_TOKEN}"
+  echo "opts:${ARGOCD_OPTS:-<unset>}"
+} > '`+logPath+`'
+printf 'Logged In: true\nUsername: alice\nIssuer: https://dex.example.com\nGroups: dev\n'
+`)
+	t.Setenv("ARGOCD_OPTS", "--insecure") // 调用方 shell 里的 Argo 变量不该混进来
+
+	a := readArgoStatus()
+	if a == nil || !a.Configured || a.Server != "https://argocd.example.com" || a.Host != "argocd.example.com" {
+		t.Fatalf("配置读错: %+v", a)
+	}
+	if !a.Checkable || !a.Checked || !a.LoggedIn || a.User != "alice" || a.Issuer != "https://dex.example.com" {
+		t.Errorf("验证结果 = %+v", a)
+	}
+	if !a.HasToken || !a.GRPCWeb {
+		t.Errorf("token/grpc-web = %v/%v", a.HasToken, a.GRPCWeb)
+	}
+
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := string(log)
+	if strings.Contains(strings.SplitN(lines, "\n", 2)[0], argoTestToken) {
+		t.Errorf("token 出现在命令行参数里: %s", lines)
+	}
+	if !strings.Contains(lines, "token:"+argoTestToken) {
+		t.Errorf("token 没通过环境变量传进去: %s", lines)
+	}
+	if !strings.Contains(lines, "opts:<unset>") {
+		t.Errorf("调用方的 ARGOCD_OPTS 应该被清掉: %s", lines)
+	}
+	if !strings.Contains(lines, "--config") || !strings.Contains(lines, "--server argocd.example.com") ||
+		!strings.Contains(lines, "--grpc-web") || !strings.Contains(lines, "account get-user-info") {
+		t.Errorf("参数不对: %s", lines)
+	}
+	if strings.Contains(lines, "--plaintext") {
+		t.Errorf("https 不该带 --plaintext: %s", lines)
+	}
+	if strings.Contains(a.Note+a.User+a.Issuer, argoTestToken) {
+		t.Error("状态里不该带 token")
+	}
+}
+
+func TestReadArgoStatusRejectsBadToken(t *testing.T) {
+	sb := newArgoSandbox(t)
+	sb.configure(t, "https://argocd.example.com", argoTestToken)
+	sb.fakeArgocd(t, filepath.Join(t.TempDir(), "calls.log"), `
+echo 'rpc error: code = Unauthenticated desc = invalid session: signature is invalid' >&2
+exit 1
+`)
+	a := readArgoStatus()
+	if !a.Configured || !a.HasToken {
+		t.Fatalf("配置/token 没读到: %+v", a)
+	}
+	// 连上了、服务器明确拒了 token：算「验证过」，但不算「可用」
+	if a.LoggedIn || !a.Checked || !a.Checkable {
+		t.Errorf("不该当成验证通过: %+v", a)
+	}
+	if !strings.Contains(a.Note, "不认这个 token") {
+		t.Errorf("说明 = %q", a.Note)
+	}
+	if head, kind := argoBadge(a, false); kind != "warn" || !strings.Contains(head, "token 不可用") {
+		t.Errorf("badge = %q %q", head, kind)
+	}
+}
+
+func TestReadArgoStatusWithoutCLI(t *testing.T) {
+	sb := newArgoSandbox(t)
+	sb.configure(t, "https://argocd.example.com", argoTestToken)
+	a := readArgoStatus()
+	if !a.Configured || !a.HasToken || a.Checkable || a.Checked {
+		t.Errorf("没有 argocd 时只该说配置: %+v", a)
+	}
+	if head, kind := argoBadge(a, false); kind != "warn" || !strings.Contains(head, "没装 argocd") {
+		t.Errorf("badge = %q %q", head, kind)
+	}
+	_, _, fields := argoInfo(toolState{Tool: tool{Key: "argo-token"}, Argo: a})
+	joined := fieldsText(fields)
+	if !strings.Contains(joined, "没跑：本机没有 argocd CLI") || !strings.Contains(joined, "hmck install argocd") {
+		t.Errorf("信息页没说清怎么验证: %s", joined)
+	}
+}
+
+func TestReadArgoStatusNotConfigured(t *testing.T) {
+	newArgoSandbox(t)
+	a := readArgoStatus()
+	if a == nil || a.Configured || a.HasToken || a.Checked {
+		t.Fatalf("没配置时不该有状态: %+v", a)
+	}
+	if head, kind := argoBadge(a, false); kind != "missing" || !strings.Contains(head, "还没配置") {
+		t.Errorf("badge = %q %q", head, kind)
 	}
 }

@@ -15,7 +15,7 @@
 | --- | --- |
 | [kube-token](https://github.com/hongmengchen/kube-token) | 粘贴新 token 替换 kubeconfig 里的旧值 |
 | [npm-token](https://github.com/hongmengchen/npm-token) | 检查并更新 `~/.npmrc` 里的 registry token |
-| [argo-token](https://github.com/hongmengchen/argo-token) | 配置 Argo CD 服务器和只读 token |
+| [argo-token](https://github.com/hongmengchen/argo-token) | 配置 Argo CD 服务器和只读 token；用官方 `argocd` CLI 验它还能不能用 |
 | [glab](https://gitlab.com/gitlab-org/cli) | GitLab 官方 CLI：MR、issue、流水线都在终端里；装了就能看登录状态 |
 | [kubectl](https://kubernetes.io/docs/reference/kubectl/) | Kubernetes 命令行（`dl.k8s.io` 发版）：看当前 context、API server、连不连得上 |
 | [argocd](https://github.com/argoproj/argo-cd) | Argo CD 命令行：应用、同步、回滚都在终端里 |
@@ -83,7 +83,7 @@ $ hmck
 
 第一行最右边是**上一次版本更新时间**：hmck 自己装上/升级成功时记进 `state.json`（和 `config.json` 同目录），显示成「刚刚更新 / 3 小时前更新 / 12 天前更新」，超过一个月给日期。不是 hmck 装的（手动替换、从别处拷过来的），就用二进制文件的修改时间兜底，所以每个装好的工具都有时间可看。
 
-`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`n` 打开工具目录，挑一个 `enter` 加入并安装（已加入的直接装/升级），目录里按 `a` 才是按仓库新增，填仓库（`owner/name` 或 GitHub 链接）、key 和说明，`enter` 存进配置并直接开始安装；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`i` 看当前状况（glab 的登录状态、kubectl 的集群状态在这一页）；`g` 看选中工具的更新日志；`y` 打开[多端同步](#多端同步)页；`d` 卸载；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
+`enter` 直接进对应工具的 TUI，用完退出就回到 hmck；选到 hmck 自己时 `enter` 是升级它；`n` 打开工具目录，挑一个 `enter` 加入并安装（已加入的直接装/升级），目录里按 `a` 才是按仓库新增，填仓库（`owner/name` 或 GitHub 链接）、key 和说明，`enter` 存进配置并直接开始安装；`u` 升级选中的工具；`U` 把所有可更新的工具（包括 hmck 自己）按顺序升一遍，结果页逐个列出 `旧版 → 新版`；没装的按 `enter` 就装；`i` 看当前状况（glab 的登录状态、kubectl 的集群状态、argo-token 的 token 还能不能用都在这一页）；`g` 看选中工具的更新日志；`y` 打开[多端同步](#多端同步)页；`d` 卸载；`s` 安装/刷新 agent skill；`r` 重新查一遍版本。
 
 终端不高时列表自动换成**紧凑版**：一个工具一行，招牌和分隔线收起来，标题、同步状态和按键提示始终留在屏幕上。工具多到一屏还放不下时，只画光标附近那几行，上下注明「上面/下面还有 N 行」。
 
@@ -123,11 +123,22 @@ hmck changelog kube-token --versions 2
 - `! Sought 连不上`——说明是 token 过期、超时还是地址不通（token 过期会提示用 `kube-token` 换新）；
 - `○ 没有当前 context`——提示在终端里跑 `kubectl config use-context`。
 
-再往下是每个工具都有的：已装版本、最新版、装在哪、上次更新时间、PATH 上的其他副本、仓库。hmck 只跑 `glab auth status` 和 `kubectl config view` / `kubectl version`，不读 token、证书本身。
+argo-token 配好以后，第一行是这个 token 现在还能不能用——hmck 拿官方 `argocd` CLI 问一次 `account get-user-info`（只读）：
+
+- `✓ token 可用（alice）`——跟着是服务器、账号、签发方、token 文件位置、grpc-web 开关；
+- `! token 不可用 · 重新运行 argo-token`——CLI 连上了服务器，但服务器不认这个 token（过期、被撤销或抄错）；
+- `! 验证没通过：连接超时…`——区分超时、连不上服务器、TLS 握手失败，说明写在「说明」一行；
+- `已配置 · 没装 argocd，没法验证`——配置和 token 都在，但本机没有官方 CLI；`hmck install argocd` 之后就能验；
+- `○ 还没配置 · 运行 hmck run argo-token 填写`——配置里还没有服务器或 token。
+
+token 只从子进程的 `ARGOCD_AUTH_TOKEN` 环境变量进去，不放进命令行参数（`ps` 看不到），也不写进 hmck 的输出；验证时 `--config` 指向一个临时空路径，不读、不刷新、不改写你平时 `argocd login` 那个 context。
+
+再往下是每个工具都有的：已装版本、最新版、装在哪、上次更新时间、PATH 上的其他副本、仓库。hmck 只跑 `glab auth status`、`kubectl config view` / `kubectl version` 和 `argocd account get-user-info`，不读 token、证书本身。
 
 ```bash
 hmck info glab               # 终端里看同一份；--json 给脚本用
 hmck info kubectl            # 当前 context、API server、服务端版本、连通性
+hmck info argo-token         # Argo 服务器、token 还在不在、官方 CLI 怎么说
 ```
 
 ### 卸载
@@ -271,7 +282,7 @@ GitHub（以及任何拿到仓库的人）看到的是一个 `.enc` 文件。
 hmck sync push            # 第一次：自动建 <你的用户名>/hmck-config（私有）、设置同步密码
 hmck sync                 # 看状态：仓库、上次推送/拉取、参与同步的设备、会同步哪些文件
 hmck sync pull            # 另一台机器：输同一个密码，把配置写回来
-hmck sync pull --dry-run  # 只看会改哪些文件，不动本机
+hmck sync pull --dry-run  # 逐文件看文本差异，不动本机
 hmck sync add ~/.npmrc    # 额外同步一个文件（config:… / home:… 也行）
 hmck sync rm ~/.npmrc     # 不再同步它
 hmck sync off             # 本机忘掉仓库和密码（远端数据不动）
@@ -279,11 +290,15 @@ hmck sync off             # 本机忘掉仓库和密码（远端数据不动）
 
 **TUI 里也能同步**：列表按 `y` 打开同步页。上半页是本机状态（GitHub CLI 装没装/登没登录、
 仓库、密钥记没记住、会同步多少个文件、参与同步的设备、上次推送/拉取），下半页是能做的事：推送、
-拉取、预览远端会改哪些文件、刷新设备列表、强制推送/拉取、添加要同步的路径、忘掉本机密钥
-（按两次 `enter` 才执行）。gh 没装或没登录时，菜单最前面先放「安装 GitHub CLI」/「登录 GitHub CLI」，
-按提示走完回到页面就自动重新检测，也可以随时按 `r` 再查一遍。本机还没记住密钥时，同步密码直接
-在页面里输入（掩码显示；首次推送输两遍），只用于这一次请求，不写盘、不进命令行参数、不上传。
-拉取成功后列表和开关会从磁盘重新读一遍，不用退出重开。
+拉取、预览逐文件的文本差异、刷新设备列表、管理各工具同步、强制推送/拉取、添加要同步的路径、忘掉本机密钥
+（按两次 `enter` 才执行）。逐工具管理在首次连接前也能打开；选中工具按 `enter` 切换本机开关。
+gh 没装或没登录时，菜单最前面先放「安装 GitHub CLI」/「登录 GitHub CLI」，按提示走完回到页面就自动重新检测，
+也可以随时按 `r` 再查一遍。本机还没记住密钥时，同步密码直接在页面里输入（掩码显示；首次推送输两遍），
+只用于这一次请求，不写盘、不进命令行参数、不上传。拉取成功后列表和开关会从磁盘重新读一遍，不用退出重开。
+
+**预览变更内容**：`hmck sync pull --dry-run` 和 TUI 预览会按文件列出新增/变更状态及文本行差异，
+不会写本机文件或同步状态；TUI 预览页支持滚动。常见凭据文件及含疑似凭据的文件不展示差异内容，
+二进制文件也不展示内容；终端控制字符会转义。若本机存在冲突，预览会提示普通 pull 会拒绝覆盖；需要明确使用 `--force` 才能应用。
 
 **看得到有哪些设备**：每台机器第一次推送/拉取时会给自己生成一个固定 ID，连同主机名、系统、
 最近一次推送/拉取时间一起记进设备表，加密后随同步数据走。`hmck sync` 在「设备」那几行列出来
@@ -292,9 +307,21 @@ hmck sync off             # 本机忘掉仓库和密码（远端数据不动）
 `device_id` 和 `devices` 两个字段，脚本直接读。
 
 **默认同步哪些文件**：hmck 自己的 `config.json`、`tools.json`，加上每个工具声明的配置
-（kube-token 的 `config.yaml`，npm-token 的 `config.json`，argo-token 的 `config.json`、
-`~/.argocd/token`、`~/.argocd/env`）。本机没有的文件跳过；手工加的路径存在 `sync.json` 里一起走。
-单文件最大 2 MiB，整包最大 8 MiB。
+（kube-token 的 `config.yaml`，npm-token 的 `config.json`，argo-token 的 `config.json` 和
+`~/.argocd/token`）。本机没有的文件跳过；手工加的路径存在 `sync.json` 里一起走。
+
+**跨系统只同步数据本身**：Windows 和 macOS/Linux 之间来回同步时，配置文件里那些「只对这台机器
+成立」的内容不会原样搬过去——
+
+- 路径字段（argo-token 的 `token_file`、npm-token 的 `file`）推上去时换成 `home:…` / `config:…`
+  的写法，拉下来再展开成本机路径。所以在 Windows 上写的 `~\.argocd\token` 到了 macOS 仍然落到
+  `~/.argocd/token`；对不上的外来绝对路径（另一台的 `C:\Users\…`）留空，由工具回到自己的默认值。
+- 纯本机数据不同步：npm-token 的 `updated_at` 这类时间戳、argo-token 从配置生成的
+  `~/.argocd/env` 都不上传，换台机器由那边的工具自己重写。
+- 没有规则的普通文件照原样逐字节同步（kube-token 的 `config.yaml` 就是这样）。
+在 TUI 的「管理各工具同步」里可以逐个关闭本机不想同步的工具：关闭后该工具在本机 push 和 pull 都会跳过，
+本机文件不会上传或被覆盖，远端已有的加密数据也保留；重新开启后即可恢复同步。偏好保存在本机 `sync.json`
+的 `disabled_tools`，不会传到其他设备；新设备默认所有支持的工具都开启。单文件最大 2 MiB，整包最大 8 MiB。
 
 **什么时候推**：保存之后自动推，不用惦记——`hmck run <工具>` 退出后、TUI 里改完配置或
 新增/删除工具后都会顺手推一次；配置没变就跳过。同步没开启时什么都不做，推送失败只提示，不影响命令本身的退出码。

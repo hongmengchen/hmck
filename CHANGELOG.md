@@ -2,6 +2,21 @@
 
 更早的版本见 [GitHub Releases](https://github.com/hongmengchen/hmck/releases)。
 
+## [0.11.0] - 2026-11-26
+
+### 新增
+
+- argo-token 也能看状态了：卡片、信息页和 `hmck info argo-token` 会显示服务器、token 在不在，并用官方 `argocd` CLI 跑一次只读的 `account get-user-info`，说清 token 还能不能用（不可用时提示重新运行 argo-token；没装 argocd 时说明没法验证）。token 只经子进程的 `ARGOCD_AUTH_TOKEN` 传进去，不进命令行参数、不出现在输出里
+- token 文件路径里的 `~` 两种分隔符都认（`~/` 和 `~\`）：从 Windows 同步来的 argo-token 配置在 macOS / Linux 上也能找到本机的 `~/.argocd/token`
+- TUI 同步页可逐个开关支持同步的工具；设置只保存在本机，关闭后本机双向跳过该工具配置，远端已有数据保留
+- `hmck sync pull --dry-run` 和 TUI 预览逐文件展示文本差异，并明确标出新增或变更文件；TUI 预览页可滚动
+- 跨系统同步只带数据本身：配置里的路径字段（argo-token 的 `token_file`、npm-token 的 `file`）推上去写成 `home:…` / `config:…`，拉下来再展开成本机路径，Windows 上写的 `~\.argocd\token` 到 macOS 不再指错地方；认不出来的外来绝对路径留空，由工具回到默认值
+- `~/.argocd/env` 不再同步：它是 argo-token 从配置生成的，换台机器由那边的 argo-token 自己重写；npm-token 的 `updated_at` 这类纯本机时间戳也不跟着走
+
+### 安全
+
+- 预览会隐藏常见凭据文件和含疑似凭据文件的差异内容，二进制文件也不展示内容，并转义终端控制字符；dry-run 检测到本机冲突时提示普通 pull 会拒绝覆盖
+
 ## [0.10.11] - 2026-11-24
 
 ### 新增

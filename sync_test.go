@@ -119,6 +119,73 @@ func TestNormalizeSyncPath(t *testing.T) {
 	}
 }
 
+// 路径字段推到远端时要变成随机器走的写法，拉下来再变回本机路径：
+// Windows 上写的 ~\.argocd\token 到了 macOS 仍然落到同一个文件。
+func TestPortableSyncDataRoundTrip(t *testing.T) {
+	isolateConfig(t)
+	home := t.TempDir()
+	oldHome := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { userHomeDir = oldHome })
+
+	argoName := "config:argo-token/config.json"
+	argoLocal := []byte("{\"server\": \"https://argocd.example.com\", \"token_file\": \"~\\\\.argocd\\\\token\", \"grpc_web\": true}\n")
+
+	up, err := portableSyncData(argoName, argoLocal, syncToRemote)
+	if err != nil {
+		t.Fatalf("推向远端: %v", err)
+	}
+	if !strings.Contains(string(up), `"home:.argocd/token"`) {
+		t.Errorf("token_file 应变成 home: 写法，得到 %s", up)
+	}
+	if strings.Contains(string(up), `\\`) {
+		t.Errorf("推向远端的内容不应再有反斜杠路径: %s", up)
+	}
+
+	down, err := portableSyncData(argoName, up, syncFromRemote)
+	if err != nil {
+		t.Fatalf("拉回本机: %v", err)
+	}
+	wantPath := filepath.ToSlash(filepath.Join(home, ".argocd", "token"))
+	if !strings.Contains(string(down), `"`+wantPath+`"`) {
+		t.Errorf("token_file 应展开成本机路径 %q，得到 %s", wantPath, down)
+	}
+
+	// npm-token 的 file 是写配置那台机器的绝对路径；本机能对上的存 home:，
+	// 对不上（比如另一台 Windows 的 C:\Users\…）就留空，让它回到默认 ~/.npmrc。
+	npmName := "config:npm-token/config.json"
+	npmLocal := []byte(`{"auto_refresh": false, "file": "` +
+		strings.ReplaceAll(filepath.Join(home, ".npmrc"), `\`, `\\`) +
+		`", "updated_at": "2026-11-23T12:16:01+08:00"}`)
+	up, err = portableSyncData(npmName, npmLocal, syncToRemote)
+	if err != nil {
+		t.Fatalf("npm 推向远端: %v", err)
+	}
+	if !strings.Contains(string(up), `"home:.npmrc"`) {
+		t.Errorf("file 应变成 home:.npmrc，得到 %s", up)
+	}
+	if strings.Contains(string(up), "updated_at") {
+		t.Errorf("本机时间戳不该跟着同步: %s", up)
+	}
+
+	foreign, err := portableSyncData(npmName, []byte(`{"file": "C:\\Users\\someone-else\\.npmrc"}`), syncToRemote)
+	if err != nil {
+		t.Fatalf("外来绝对路径: %v", err)
+	}
+	if !strings.Contains(string(foreign), `"file": ""`) {
+		t.Errorf("换机器必错的路径应留空，得到 %s", foreign)
+	}
+
+	// 没有规则的文件原样返回，一个字节都不改。
+	raw := []byte("not json at all")
+	if got, err := portableSyncData("config:kube-token/config.yaml", raw, syncToRemote); err != nil || string(got) != string(raw) {
+		t.Errorf("没有规则的文件不该改: %q %v", got, err)
+	}
+	if got, err := portableSyncData(argoName, raw, syncToRemote); err != nil || string(got) != string(raw) {
+		t.Errorf("不是 JSON 的文件不该改: %q %v", got, err)
+	}
+}
+
 func TestMergeSyncFilesKeepsRemoteOnly(t *testing.T) {
 	local := []syncFile{{Name: "home:a", Data: []byte("local")}}
 	remote := []syncFile{
@@ -134,6 +201,32 @@ func TestMergeSyncFilesKeepsRemoteOnly(t *testing.T) {
 	}
 	if got[1].Name != "home:b" || string(got[1].Data) != "only-remote" {
 		t.Errorf("远端独有的文件应保留: %+v", got[1])
+	}
+}
+
+// ~/.argocd/env 是从配置生成的本机文件，老版本把它推上去了；升级后不该
+// 继续在设备之间传，也不该在 pull 时盖掉本机那份。
+func TestSyncDropsRetiredEnvFile(t *testing.T) {
+	isolateConfig(t)
+	retired := syncFile{Name: "home:.argocd/env", Data: []byte("export ARGOCD_SERVER='x'\n")}
+
+	got := mergeSyncFiles([]syncFile{{Name: "home:.argocd/token", Data: []byte("t")}}, []syncFile{retired})
+	for _, f := range got {
+		if f.Name == retired.Name {
+			t.Fatalf("推送时不该再把 %s 带回去: %+v", retired.Name, got)
+		}
+	}
+
+	st, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := filterSyncPayloadForDevice(syncPayload{Files: []syncFile{retired, {Name: "home:.argocd/token"}}}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Files) != 1 || p.Files[0].Name != "home:.argocd/token" {
+		t.Errorf("pull 时不该写 %s: %+v", retired.Name, p.Files)
 	}
 }
 
@@ -386,6 +479,88 @@ func TestSyncPushPullRoundTrip(t *testing.T) {
 	}
 	if fake.puts != puts {
 		t.Errorf("没变化却推送了 %d 次", fake.puts-puts)
+	}
+}
+
+func TestSyncDryRunShowsContentWithoutMutating(t *testing.T) {
+	_, home, _ := setupSyncTest(t)
+	logicalName := "home:.hmck-preview.yaml"
+	filePath := filepath.Join(home, ".hmck-preview.yaml")
+	if err := os.WriteFile(filePath, []byte("endpoint: remote.example\nmode: production\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeSyncTestState(t, "preview-passphrase")
+	st, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.ExtraPaths = []string{logicalName}
+	if _, err := saveSyncState(st); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncPush(syncOptions{}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	local := []byte("endpoint: local.example\nmode: development\n")
+	if err := os.WriteFile(filePath, local, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var preview []syncPreviewFile
+	msg, err := syncPullWithPreview(syncOptions{dryRun: true}, &preview)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if !strings.Contains(msg, "普通 pull 会拒绝覆盖") {
+		t.Fatalf("预览应提示普通 pull 会因本机冲突拒绝: %s", msg)
+	}
+	if len(preview) == 0 || !strings.Contains(renderSyncPreview(preview), "- endpoint: local.example") || !strings.Contains(renderSyncPreview(preview), "+ endpoint: remote.example") {
+		t.Fatal("预览没有展示本机与远端的实际内容差异")
+	}
+	got, err := os.ReadFile(filePath)
+	if err != nil || !bytes.Equal(got, local) {
+		t.Fatal("dry-run 改写了本机文件")
+	}
+	after, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LastPull != before.LastPull || after.LastHash != before.LastHash || after.LastSHA != before.LastSHA {
+		t.Fatal("dry-run 改变了本机同步状态")
+	}
+}
+
+func TestSyncPreviewHidesCredentialContent(t *testing.T) {
+	secrets := []string{"secret-token-value", "password-value-123"}
+	files := []syncPreviewFile{
+		makeSyncPreviewFile("home:.argocd/token", []byte(secrets[0]), []byte("different-secret-token"), true),
+		makeSyncPreviewFile("home:.config/service/settings.yaml", []byte("password: "+secrets[1]+"\n"), []byte("password: another-password\n"), true),
+	}
+	if !files[0].Sensitive || !files[1].Sensitive {
+		t.Fatal("检测到凭据的文件应整体标记为隐藏")
+	}
+	output := renderSyncPreview(files)
+	for _, secret := range secrets {
+		if strings.Contains(output, secret) {
+			t.Fatal("预览泄露了凭据内容")
+		}
+	}
+}
+
+func TestSyncPreviewShowsTextDiffAndEscapesControls(t *testing.T) {
+	f := makeSyncPreviewFile("home:.config/example.yaml", []byte("name: old\nkeep: yes\n"), []byte("name: new\nkeep: yes\n"), true)
+	output := renderSyncPreview([]syncPreviewFile{f})
+	if !strings.Contains(output, "- name: old") || !strings.Contains(output, "+ name: new") || strings.Contains(output, "keep: yes") {
+		t.Fatal("预览应只展示实际变更行")
+	}
+	f = makeSyncPreviewFile("home:.config/example.yaml", []byte("name: old\x1b[31m\n"), []byte("name: new\n"), true)
+	if strings.Contains(renderSyncPreview([]syncPreviewFile{f}), "\x1b") {
+		t.Fatal("预览不应透传终端控制字符")
 	}
 }
 
@@ -710,5 +885,212 @@ func TestSyncFlagsGoToStatus(t *testing.T) {
 	}
 	if _, ok := got["devices"]; !ok {
 		t.Errorf("status JSON 里没有 devices: %s", data)
+	}
+}
+
+func TestSyncToolOptOutFiltersManifestPaths(t *testing.T) {
+	_, _, configDir := setupSyncTest(t)
+	custom := toolsConfig{Tools: []tool{{
+		Key: "custom-sync", Repo: "owner/custom-sync",
+		SyncPaths: []string{"home:.custom-sync/settings.json"},
+	}}}
+	data, err := json.Marshal(custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "hmck", "tools.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tools, err := syncableTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundCustom := false
+	for _, tool := range tools {
+		if tool.Key == "custom-sync" {
+			foundCustom = true
+		}
+	}
+	if !foundCustom {
+		t.Fatal("声明 SyncPaths 的自定义工具没有进入可管理清单")
+	}
+
+	st := syncState{
+		DisabledTools: []string{"ARGO-TOKEN", "custom-sync", "removed-tool"},
+		ExtraPaths:    []string{"home:.argocd/token", "home:.custom-sync/settings.json"},
+	}
+	if syncToolEnabled(st, "argo-token") || !syncToolEnabled(st, "kube-token") {
+		t.Fatal("逐工具开关应按 key 生效，未配置工具默认开启")
+	}
+	names, err := syncNames(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, disabled := range []string{
+		"config:argo-token/config.json", "home:.argocd/token", "home:.argocd/env",
+		"home:.custom-sync/settings.json",
+	} {
+		for _, name := range names {
+			if name == disabled {
+				t.Errorf("关闭工具后路径仍在同步清单中: %s", disabled)
+			}
+		}
+	}
+	for _, enabled := range []string{"config:hmck/config.json", "config:hmck/tools.json", "config:kube-token/config.yaml"} {
+		found := false
+		for _, name := range names {
+			found = found || name == enabled
+		}
+		if !found {
+			t.Errorf("未关闭的同步路径被误删: %s", enabled)
+		}
+	}
+
+	setSyncToolEnabled(&st, "custom-sync", true)
+	if !syncToolEnabled(st, "custom-sync") || syncToolEnabled(st, "argo-token") {
+		t.Fatal("重新开启自定义工具时不应影响其他工具设置")
+	}
+	if !containsString(st.DisabledTools, "removed-tool") {
+		t.Fatal("暂时不可用的未知工具设置应保留")
+	}
+	if _, err := saveSyncState(st); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(reloaded.DisabledTools, "removed-tool") || syncToolEnabled(reloaded, "argo-token") {
+		t.Fatal("本机禁用设置没有可靠持久化")
+	}
+}
+
+func TestDisabledToolPushKeepsExistingRemoteData(t *testing.T) {
+	fake, home, configDir := setupSyncTest(t)
+	tokenPath := filepath.Join(home, ".argocd", "token")
+	configPath := filepath.Join(configDir, "argo-token", "config.json")
+	for _, path := range []string{tokenPath, configPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(tokenPath, []byte("remote-token-v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("remote config v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := writeSyncTestState(t, "preservation-passphrase")
+	if _, err := syncPush(syncOptions{}); err != nil {
+		t.Fatalf("初次推送失败: %v", err)
+	}
+
+	st, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.DisabledTools = []string{"argo-token"}
+	// 即使用户额外添加了相同路径，工具开关仍然优先。
+	st.ExtraPaths = []string{"home:.argocd/token"}
+	if _, err := saveSyncState(st); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("local-token-v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncPush(syncOptions{}); err != nil {
+		t.Fatalf("关闭工具后的推送失败: %v", err)
+	}
+
+	plain, err := decryptSyncPayload(key, fake.files["alice/"+syncRepoName+"/"+syncRemoteFile])
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := payloadFiles(t, plain)
+	if files["home:.argocd/token"] != "remote-token-v1" {
+		t.Error("关闭的工具不应把本机新值推上去，也不应删除远端旧数据")
+	}
+	if files["config:argo-token/config.json"] != "remote config v1" {
+		t.Error("关闭的工具配置应继续保留在远端")
+	}
+}
+
+func TestDisabledToolPullSkipsConflictsPreviewAndApply(t *testing.T) {
+	fake, home, _ := setupSyncTest(t)
+	tokenPath := filepath.Join(home, ".argocd", "token")
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("remote-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := writeSyncTestState(t, "pull-filter-passphrase")
+	if _, err := syncPush(syncOptions{}); err != nil {
+		t.Fatalf("初次推送失败: %v", err)
+	}
+	remoteKey := "alice/" + syncRepoName + "/" + syncRemoteFile
+	remoteRaw := append([]byte(nil), fake.files[remoteKey]...)
+	plain, err := decryptSyncPayload(key, remoteRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var remotePayload syncPayload
+	if err := json.Unmarshal(plain, &remotePayload); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.DisabledTools = []string{"argo-token"}
+	if _, err := saveSyncState(st); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("local-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var preview []syncPreviewFile
+	msg, err := syncPullWithPreview(syncOptions{dryRun: true}, &preview)
+	if err != nil {
+		t.Fatalf("禁用工具后的预览失败: %v", err)
+	}
+	if strings.Contains(msg, "普通 pull 会拒绝覆盖") {
+		t.Fatalf("禁用路径不应触发冲突检查: %s", msg)
+	}
+	previewText := renderSyncPreview(preview)
+	if strings.Contains(previewText, "home:.argocd/token") || strings.Contains(previewText, "remote-token") {
+		t.Fatal("预览不应列出或显示禁用工具的远端文件")
+	}
+	local, err := os.ReadFile(tokenPath)
+	if err != nil || string(local) != "local-token" {
+		t.Fatal("dry-run 改动了禁用工具的本机文件")
+	}
+
+	if _, err := syncPull(syncOptions{}); err != nil {
+		t.Fatalf("禁用路径不应阻止 pull: %v", err)
+	}
+	local, err = os.ReadFile(tokenPath)
+	if err != nil || string(local) != "local-token" {
+		t.Fatal("pull 覆盖或删除了本机禁用工具的文件")
+	}
+	after, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LastSHA != fileSHA(remoteRaw) {
+		t.Fatal("pull 应继续按未过滤的原始远端 payload 更新 SHA 历史")
+	}
+	expectedHash, err := payloadHash(remotePayload.Files, mergeSyncPaths(st.ExtraPaths, remotePayload.Paths))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LastHash != expectedHash {
+		t.Fatal("pull 应继续按原始远端 payload 更新内容历史")
+	}
+	if !containsString(after.DisabledTools, "argo-token") {
+		t.Fatal("pull 不应覆盖本机逐工具设置")
 	}
 }

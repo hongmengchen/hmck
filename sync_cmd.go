@@ -81,7 +81,7 @@ func syncUsage(w io.Writer) {
   hmck sync                 看同步状态（仓库、密钥、上次推送/拉取、设备、同步清单）
   hmck sync --json          同样的状态，给脚本/agent 解析
   hmck sync push            把本机配置加密后推到仓库；第一次会建仓库、设密码
-  hmck sync pull            把仓库里的配置拉下来（--dry-run 只看会改哪些文件）
+  hmck sync pull            把仓库里的配置拉下来（--dry-run 逐文件预览文本差异）
   hmck sync add <路径>      额外同步一个文件（config:… / home:… / ~/…）
   hmck sync rm <路径>       去掉一个额外路径
   hmck sync off             忘掉本机的仓库和同步密码（远端数据不动）
@@ -229,13 +229,17 @@ func runSyncPull(args []string) int {
 	if code != 0 {
 		return code
 	}
-	msg, err := syncPull(opts)
+	var preview []syncPreviewFile
+	msg, err := syncPullWithPreview(opts, &preview)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "✗ %v\n", err)
 		return 1
 	}
 	if !opts.quiet {
 		fmt.Println("✓ " + msg)
+		if opts.dryRun {
+			fmt.Print(renderSyncPreview(preview))
+		}
 	}
 	return 0
 }
@@ -515,6 +519,12 @@ func syncPush(opts syncOptions) (string, error) {
 }
 
 func syncPull(opts syncOptions) (string, error) {
+	return syncPullWithPreview(opts, nil)
+}
+
+// syncPullWithPreview shares the normal pull path with CLI/TUI dry-runs. Preview
+// data is returned only when the caller asks for it and opts.dryRun is true.
+func syncPullWithPreview(opts syncOptions, previewOut *[]syncPreviewFile) (string, error) {
 	syncMu.Lock()
 	defer syncMu.Unlock()
 
@@ -601,22 +611,35 @@ func syncPull(opts syncOptions) (string, error) {
 		return "", fmt.Errorf("同步内容版本 %d 不认识（本机 hmck 太旧？）", p.Version)
 	}
 
-	if !opts.dryRun && !opts.force && st.LastHash != "" {
-		if changed := diffAgainstPayload(p); len(changed) > 0 {
-			preview := changed
-			if len(preview) > 3 {
-				preview = append(append([]string(nil), preview[:3]...), "…")
-			}
-			return "", fmt.Errorf("本机有 %d 个文件和远端不一样（%s），pull 会覆盖本机改动。先 hmck sync push，或加 --force", len(changed), strings.Join(preview, "、"))
-		}
-	}
-
-	written, same, err := applySyncPayload(p, opts.dryRun)
+	devicePayload, err := filterSyncPayloadForDevice(p, st)
 	if err != nil {
 		return "", err
 	}
+	var conflicts []string
+	if !opts.force && st.LastHash != "" {
+		conflicts = diffAgainstPayload(devicePayload)
+		if !opts.dryRun && len(conflicts) > 0 {
+			preview := conflicts
+			if len(preview) > 3 {
+				preview = append(append([]string(nil), preview[:3]...), "…")
+			}
+			return "", fmt.Errorf("本机有 %d 个文件和远端不一样（%s），pull 会覆盖本机改动。先 hmck sync push，或加 --force", len(conflicts), strings.Join(preview, "、"))
+		}
+	}
+
+	written, same, previewFiles, err := applySyncPayload(devicePayload, opts.dryRun, opts.dryRun && previewOut != nil)
+	if err != nil {
+		return "", err
+	}
+	if previewOut != nil {
+		*previewOut = previewFiles
+	}
 	if opts.dryRun {
-		return fmt.Sprintf("预览：会写入 %d 个文件，%d 个没变（%s）", len(written), len(same), repo), nil
+		msg := fmt.Sprintf("预览：会写入 %d 个文件，%d 个没变（%s）", len(written), len(same), repo)
+		if len(conflicts) > 0 {
+			msg += fmt.Sprintf("；有 %d 个本机冲突，普通 pull 会拒绝覆盖", len(conflicts))
+		}
+		return msg, nil
 	}
 
 	hash, err := payloadHash(p.Files, mergeSyncPaths(st.ExtraPaths, p.Paths))

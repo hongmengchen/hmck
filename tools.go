@@ -41,8 +41,8 @@ type tool struct {
 	Kind string `json:"-"`
 
 	OwnDir       bool   `json:"-"` // 只管理 hmck 目录里的那一份，不接管 PATH 上别人装的副本（如 glab、kubectl）
-	Status       bool   `json:"-"` // hmck 能读出它自己的状态（登录 / 集群）
-	StatusSource string `json:"-"` // 状态怎么读：glab（默认，看登录）/ kubectl（看集群）
+	Status       bool   `json:"-"` // hmck 能读出它自己的状态（登录 / 集群 / token）
+	StatusSource string `json:"-"` // 状态怎么读：glab（默认，看登录）/ kubectl（看集群）/ argocd（看 Argo token）
 	Custom       bool   `json:"-"` // 来自本机配置，不是内置
 	Self         bool   `json:"-"` // hmck 自己：路径取当前可执行文件，版本用内置的
 }
@@ -144,11 +144,16 @@ var registry = []tool{
 		Checksums:   true,
 		Skill:       true,
 		PostInstall: []string{"skill", "--quiet"},
+		// ~/.argocd/env 是 argo-token 从配置生成的（里面是服务器地址和 token
+		// 路径），不跟着同步：换一台机器由那边的 argo-token 自己重写。
 		SyncPaths: []string{
 			"config:argo-token/config.json",
 			"home:.argocd/token",
-			"home:.argocd/env",
 		},
+		// 状态问的是官方 argocd CLI（account get-user-info），不是 argo-token 自己：
+		// 配置在、token 在、argocd 在，就能说清这个 token 现在还能不能用
+		Status:       true,
+		StatusSource: "argocd",
 	},
 	{
 		// glab 是 GitLab 官方 CLI，在 gitlab.com 发版，资产是 tar.gz / zip。
@@ -562,6 +567,7 @@ type toolState struct {
 	LoginKind string      // ok / warn / missing，决定这句话怎么染色
 	Logins    []glabLogin // 读到的各家主机登录情况（glab 这类工具才有）
 	Kube      *kubeStatus // 当前 context / API server / 连不连得上（kubectl 才有）
+	Argo      *argoStatus // Argo CD 服务器 / token 还能不能用（argo-token 才有）
 }
 
 func (s toolState) Missing() bool { return s.Path == "" || s.Installed == "" }
@@ -615,23 +621,30 @@ func inspectLocal(t tool) toolState {
 		}
 	}
 	if t.Status {
-		// 状态问的是工具自己：hmck 目录里的优先，没有就用 PATH 上那份
-		if bin := toolCopy(st); bin != "" {
-			if t.StatusSource == "kubectl" {
-				st.Kube = readKubeStatus(bin)
-				if st.Kube == nil {
-					st.Login, st.LoginKind = "读不出集群状态", "warn"
+		switch t.StatusSource {
+		case "argocd":
+			// argo-token 的状态不看它自己的二进制：配置在、官方 argocd 在就能验
+			st.Argo = readArgoStatus()
+			st.Login, st.LoginKind = argoBadge(st.Argo, st.Missing())
+		default:
+			// 状态问的是工具自己：hmck 目录里的优先，没有就用 PATH 上那份
+			if bin := toolCopy(st); bin != "" {
+				if t.StatusSource == "kubectl" {
+					st.Kube = readKubeStatus(bin)
+					if st.Kube == nil {
+						st.Login, st.LoginKind = "读不出集群状态", "warn"
+					} else {
+						st.Login, st.LoginKind = kubeBadge(st.Kube)
+					}
 				} else {
-					st.Login, st.LoginKind = kubeBadge(st.Kube)
-				}
-			} else {
-				logins, err := glabAuthLogins(bin)
-				switch {
-				case err != nil:
-					st.Login, st.LoginKind = "读不出登录状态", "warn"
-				default:
-					st.Logins = logins
-					st.Login, st.LoginKind = loginBadgeOf(logins)
+					logins, err := glabAuthLogins(bin)
+					switch {
+					case err != nil:
+						st.Login, st.LoginKind = "读不出登录状态", "warn"
+					default:
+						st.Logins = logins
+						st.Login, st.LoginKind = loginBadgeOf(logins)
+					}
 				}
 			}
 		}

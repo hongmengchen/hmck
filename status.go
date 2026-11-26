@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -420,10 +423,382 @@ func kubeInfo(st toolState) (string, string, []infoField) {
 	return headline, kind, fields
 }
 
-// statusInfo 按工具选读状态的那一套：glab 看登录，kubectl 看集群
+// ---------- Argo CD 状态（argocd CLI） ----------
+
+// argoTokenConfig 是 argo-token 写下的配置，字段和它自己的 config.json 一致：
+// 连哪台服务器、token 放在哪个文件、要不要走 grpc-web。没有 token 本身。
+type argoTokenConfig struct {
+	Server    string `json:"server"`
+	TokenFile string `json:"token_file"`
+	GRPCWeb   bool   `json:"grpc_web"`
+}
+
+// argoStatus 是「argo-token 配好了没有、argocd CLI 拿这个 token 还能不能登录」。
+// token 只在验证时过一遍子进程的环境变量，不进这里、也不打印。
+type argoStatus struct {
+	Configured bool
+	Server     string // 配置里的地址，原样（带协议）
+	Host       string // 给 argocd --server 用的 host[:port]
+	TokenFile  string
+	GRPCWeb    bool
+	HasToken   bool
+	Checkable  bool // 本机有 argocd CLI，能真的验一次
+	Checked    bool // CLI 连上了服务器并给出了回答
+	LoggedIn   bool
+	User       string
+	Issuer     string
+	Note       string // 没配置 / 没 token / 验证没通过时的一句话
+}
+
+// argoConfigPath 是 argo-token 的配置文件，和它自己的 configPath 一致
+func argoConfigPath() (string, error) {
+	dir, err := userConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "argo-token", "config.json"), nil
+}
+
+// argoDefaultTokenFile 是 argo-token 的默认 token 位置
+func argoDefaultTokenFile() string {
+	home, err := userHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".argocd", "token")
+}
+
+// argoLocalTokenFile 把配置里的 token 路径落到本机。配置会跟着 hmck sync
+// 在几台机器之间走，从 Windows 同步来的可能是 `~\.argocd\token`：
+// 两种分隔符都认，落到当前系统的家目录下；路径本身不解释的话状态就会说错。
+func argoLocalTokenFile(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return argoDefaultTokenFile()
+	}
+	home, err := userHomeDir()
+	if err == nil && home != "" {
+		switch {
+		case p == "~":
+			p = home
+		case strings.HasPrefix(p, "~/"), strings.HasPrefix(p, `~\`):
+			rel := strings.ReplaceAll(p[2:], `\`, "/")
+			p = filepath.Join(home, filepath.FromSlash(rel))
+		}
+	}
+	return filepath.Clean(p)
+}
+
+// readArgoStatus 读 argo-token 的配置，再用官方 argocd CLI 验一次 token。
+// 不要求 argo-token 自己装着：配置在就先说配置，argocd 在就再验一遍 token。
+func readArgoStatus() *argoStatus {
+	path, err := argoConfigPath()
+	if err != nil {
+		return nil
+	}
+	a := &argoStatus{}
+	data, err := os.ReadFile(path)
+	switch {
+	case os.IsNotExist(err):
+		return a // 从来没配置过，界面按「还没配置」说
+	case err != nil:
+		a.Note = "读不了 argo-token 配置：" + trimNote(err.Error())
+		return a
+	}
+	var cfg argoTokenConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		a.Note = "argo-token 配置不是合法 JSON"
+		return a
+	}
+
+	a.Configured = true
+	a.Server = strings.TrimSpace(cfg.Server)
+	a.Host = argoServerHost(a.Server)
+	a.GRPCWeb = cfg.GRPCWeb
+	a.TokenFile = argoLocalTokenFile(cfg.TokenFile)
+
+	var token string
+	if a.TokenFile != "" {
+		if data, err := os.ReadFile(a.TokenFile); err == nil {
+			token = strings.TrimSpace(string(data))
+			a.HasToken = token != ""
+		}
+	}
+	if a.Server == "" || !a.HasToken {
+		return a
+	}
+
+	t, ok := toolByKey("argocd")
+	if !ok {
+		return a
+	}
+	bin := toolBinary(t)
+	if bin == "" {
+		return a
+	}
+	a.Checkable = true
+	ans := argoCheckToken(bin, cfg, a.Host, token)
+	a.Checked = ans.Answered
+	a.LoggedIn = ans.LoggedIn
+	a.User = ans.User
+	a.Issuer = ans.Issuer
+	a.Note = ans.Note
+	return a
+}
+
+// argoAnswer 是 argocd CLI 对「这个 token 还能不能用」的回答
+type argoAnswer struct {
+	Answered bool // 连上了服务器、给出了回答（认或不认 token）
+	LoggedIn bool
+	User     string
+	Issuer   string
+	Note     string
+}
+
+// argoCheckToken 用官方 CLI 问一次 `argocd account get-user-info`——只读命令。
+// token 只放进子进程的 ARGOCD_AUTH_TOKEN（不进参数，ps 看不到）；
+// --config 指向一个不存在的临时路径：既不读用户已经登录过的 context，
+// 也不让它在那儿建文件。空文件反而会被新版 argocd 当成
+// 「current-context 没设」直接拒绝。
+func argoCheckToken(bin string, cfg argoTokenConfig, host, token string) argoAnswer {
+	dir, err := os.MkdirTemp("", "hmck-argocd-*")
+	if err != nil {
+		return argoAnswer{Note: "建不了临时目录，跳过验证"}
+	}
+	defer os.RemoveAll(dir)
+	confPath := filepath.Join(dir, "config")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	args := []string{"--config", confPath, "--server", host}
+	if cfg.GRPCWeb {
+		args = append(args, "--grpc-web")
+	}
+	// 只有 http:// 才加 --plaintext；https 上加它是往明文端口打
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(cfg.Server)), "http://") {
+		args = append(args, "--plaintext")
+	}
+	args = append(args, "account", "get-user-info")
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = argoProbeEnv(token)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+
+	loggedIn, user, issuer, answered := parseArgoUserInfo(string(out))
+	if answered {
+		if loggedIn {
+			return argoAnswer{Answered: true, LoggedIn: true, User: user, Issuer: issuer}
+		}
+		return argoAnswer{Answered: true, Note: "服务器不认这个 token（重新运行 argo-token 换一个）"}
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return argoAnswer{Note: "验证超时（10 秒没连上服务器）"}
+	}
+	note := argoConnectNote(stderr.String())
+	if note == "" && err != nil {
+		note = "argocd 退出异常：" + trimNote(err.Error())
+	}
+	if note == "" {
+		note = "argocd 没给出登录状态"
+	}
+	// 服务器明确拒了 token 也是「回答了」：不是没连上，是连上了但不认这个 token
+	return argoAnswer{Answered: strings.Contains(note, "不认这个 token"), Note: note}
+}
+
+// argoProbeEnv 是验证时给子进程的环境变量：先清掉调用方 shell 里的 Argo 变量
+// （比如 ~/.argocd/env 里的 ARGOCD_OPTS），再只放这一份 token。
+func argoProbeEnv(token string) []string {
+	drop := map[string]bool{
+		"ARGOCD_AUTH_TOKEN": true,
+		"ARGOCD_SERVER":     true,
+		"ARGOCD_OPTS":       true,
+		"ARGOCD_CONTEXT":    true,
+		"ARGOCD_CONFIG":     true,
+	}
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); drop[k] {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "HMCK_NO_MIGRATE=1", "ARGOCD_AUTH_TOKEN="+token)
+}
+
+// parseArgoUserInfo 解析 `argocd account get-user-info` 的纯文本输出：
+//
+//	Logged In: true
+//	Username: alice
+//	Issuer: https://dex.example.com
+//	Groups: ...
+//
+// 退出码 0 也可能配着 `Logged In: false`，所以以这一行为准。
+func parseArgoUserInfo(out string) (loggedIn bool, user, issuer string, answered bool) {
+	for _, raw := range strings.Split(out, "\n") {
+		key, val, ok := strings.Cut(strings.TrimSpace(raw), ":")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
+		switch key {
+		case "logged in":
+			answered = true
+			loggedIn = strings.EqualFold(val, "true")
+		case "username":
+			user = val
+		case "issuer":
+			issuer = val
+		}
+	}
+	return loggedIn, user, issuer, answered
+}
+
+// argoConnectNote 把 argocd 的报错压成一句人话。报错里不会有 token，
+// 这里也不再展开整条 rpc 信息。
+func argoConnectNote(out string) string {
+	line := ""
+	for _, raw := range strings.Split(out, "\n") {
+		if s := strings.TrimSpace(raw); s != "" {
+			line = s
+			break
+		}
+	}
+	if line == "" {
+		return ""
+	}
+	low := strings.ToLower(line)
+	switch {
+	case strings.Contains(low, "unauthenticated"), strings.Contains(low, "invalid session"),
+		strings.Contains(low, "signature is invalid"), strings.Contains(low, "token is expired"),
+		strings.Contains(low, " 401"):
+		return "服务器不认这个 token（重新运行 argo-token 换一个）"
+	case strings.Contains(low, "deadline exceeded"), strings.Contains(low, "timeout"):
+		return "连接超时（检查网络或 VPN）"
+	case strings.Contains(low, "connection refused"), strings.Contains(low, "no such host"),
+		strings.Contains(low, "connection reset"), strings.Contains(low, "unavailable"):
+		return "连不上服务器（检查地址、网络或 VPN）"
+	case strings.Contains(low, "x509"), strings.Contains(low, "tls"):
+		return "TLS 握手失败（证书或代理）"
+	}
+	line = strings.TrimPrefix(line, "rpc error: ")
+	line = strings.TrimPrefix(line, "error: ")
+	return trimNote(line)
+}
+
+// trimNote 剁掉一句提示的尾巴，界面上一行放得下
+func trimNote(s string) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > 80 {
+		return string(r[:80]) + "…"
+	}
+	return s
+}
+
+// argoServerHost 把配置里的 URL 变成 argocd --server 认的 host[:port]
+func argoServerHost(server string) string {
+	s := strings.TrimSpace(server)
+	if strings.Contains(s, "://") {
+		if u, err := url.Parse(s); err == nil && u.Host != "" {
+			return u.Host
+		}
+	}
+	return strings.TrimRight(s, "/")
+}
+
+// argoBadge 是卡片第三行和信息页头一句：配置好没有、token 还能不能用
+func argoBadge(a *argoStatus, missing bool) (string, string) {
+	if a == nil {
+		return "! 读不出 Argo 配置", "warn"
+	}
+	switch {
+	case !a.Configured && a.Note != "":
+		return "! " + a.Note, "warn"
+	case !a.Configured && missing:
+		return "○ 还没配置 · 装好后填 Argo 服务器和 token", "missing"
+	case !a.Configured:
+		return "○ 还没配置 · 运行 hmck run argo-token 填写", "missing"
+	case a.Server == "":
+		return "! 配置里没有服务器地址 · 重新运行 argo-token", "warn"
+	case !a.HasToken:
+		return "! 没有 token · 运行 hmck run argo-token 粘贴", "warn"
+	case a.LoggedIn && a.User != "":
+		return "✓ token 可用（" + a.User + "）", "ok"
+	case a.LoggedIn:
+		return "✓ token 可用", "ok"
+	case !a.Checkable:
+		return "已配置 · 没装 argocd，没法验证", "warn"
+	case a.Checked:
+		return "! token 不可用 · 重新运行 argo-token", "warn"
+	default:
+		return "! 验证没通过：" + a.Note, "warn"
+	}
+}
+
+// argoInfo 是 argo-token 的头一条：配到哪、token 在不在、argocd 怎么说
+func argoInfo(st toolState) (string, string, []infoField) {
+	a := st.Argo
+	if a == nil {
+		return "! 读不出 Argo 配置", "warn", nil
+	}
+	headline, kind := argoBadge(a, st.Missing())
+
+	var fields []infoField
+	if a.Server != "" {
+		fields = append(fields, infoField{Key: "服务器", Value: a.Server})
+	}
+	if a.User != "" {
+		fields = append(fields, infoField{Key: "账号", Value: a.User})
+	}
+	if a.Issuer != "" {
+		fields = append(fields, infoField{Key: "签发方", Value: a.Issuer})
+	}
+	if a.Configured {
+		tok, tokKind := "✗ 没找到 token 文件", "missing"
+		if a.HasToken {
+			tok, tokKind = "✓ 已写入", ""
+		}
+		if a.TokenFile != "" {
+			tok += "（" + shortenHome(a.TokenFile) + "）"
+		}
+		fields = append(fields, infoField{Key: "token", Value: tok, Kind: tokKind})
+		grpc := "关"
+		if a.GRPCWeb {
+			grpc = "开（--grpc-web）"
+		}
+		fields = append(fields, infoField{Key: "grpc-web", Value: grpc})
+	}
+
+	switch {
+	case a.LoggedIn:
+		fields = append(fields, infoField{
+			Key: "验证", Value: "✓ argocd account get-user-info 说 token 可用", Kind: "ok",
+		})
+	case a.Checked:
+		fields = append(fields, infoField{Key: "验证", Value: "✗ 服务器不认这个 token", Kind: "warn"})
+	case a.Configured && a.HasToken && !a.Checkable:
+		fields = append(fields, infoField{Key: "验证", Value: "没跑：本机没有 argocd CLI", Kind: "warn"})
+	case a.Configured && a.HasToken:
+		fields = append(fields, infoField{Key: "验证", Value: "✗ 没连上服务器", Kind: "warn"})
+	}
+	if a.Note != "" && !a.LoggedIn {
+		fields = append(fields, infoField{Key: "说明", Value: a.Note, Kind: "warn"})
+	}
+	if a.Configured && a.HasToken && !a.Checkable {
+		fields = append(fields, infoField{Key: "提示", Value: "hmck install argocd 之后就能自动验证"})
+	}
+	return headline, kind, fields
+}
+
+// statusInfo 按工具选读状态的那一套：glab 看登录，kubectl 看集群，argo-token 看 token
 func statusInfo(st toolState) (string, string, []infoField) {
-	if st.Tool.StatusSource == "kubectl" {
+	switch st.Tool.StatusSource {
+	case "kubectl":
 		return kubeInfo(st)
+	case "argocd":
+		return argoInfo(st)
 	}
 	return loginInfo(st)
 }

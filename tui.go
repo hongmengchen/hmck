@@ -113,19 +113,23 @@ type tuiModel struct {
 type syncMode int
 
 const (
-	syncIdle syncMode = iota // 菜单
-	syncPass                 // 在页面里输入同步密码
-	syncPath                 // 在页面里输入要同步的路径
+	syncIdle      syncMode = iota // 菜单
+	syncPass                      // 在页面里输入同步密码
+	syncPath                      // 在页面里输入要同步的路径
+	syncDiff                      // 查看远端文件内容差异
+	syncToolsMode                 // 管理逐工具同步开关
 )
 
 // syncView 是多端同步页的状态。密码只在当前这次 push/pull 里用，
 // 输入完交给后台命令后就清掉，不写盘、不进命令行参数。
 type syncView struct {
-	mode   syncMode
-	cursor int
-	busy   bool   // 正在和 GitHub 通信
-	msg    string // 上次动作的结果
-	err    string // 上次动作失败的原因
+	mode          syncMode
+	cursor        int
+	busy          bool              // 正在和 GitHub 通信
+	msg           string            // 上次动作的结果
+	err           string            // 上次动作失败的原因
+	preview       []syncPreviewFile // 最近一次预览的文件差异
+	previewScroll int
 
 	action    string // 等密码回来后要执行的动作
 	pass      string // 正在输入的密码
@@ -134,6 +138,9 @@ type syncView struct {
 
 	path     string // 正在输入的同步路径
 	offArmed bool   // 忘掉密钥要按两次：第一次只是提醒
+
+	toolCursor int // 逐工具同步开关页的光标
+	toolScroll int // 逐工具同步开关页的滚动位置
 
 	ghChecked bool   // 已经问过本机的 gh 了
 	ghFound   bool   // gh 装没装
@@ -260,10 +267,11 @@ type syncDoneMsg struct {
 // syncActionMsg 是同步页上 push/pull/off 跑完的结果；
 // reload 表示远端可能改了配置和工具清单，页面要重新读一遍
 type syncActionMsg struct {
-	action string
-	msg    string
-	err    error
-	reload bool
+	action  string
+	msg     string
+	err     error
+	reload  bool
+	preview []syncPreviewFile
 }
 
 // ghCheckMsg 是同步页开工前看一眼本机 GitHub CLI 的结果
@@ -633,8 +641,9 @@ func syncRunCmd(action, pass string) tea.Cmd {
 			msg, err := syncPull(syncOptions{pass: pass})
 			return syncActionMsg{action: action, msg: msg, err: err, reload: err == nil}
 		case "preview":
-			msg, err := syncPull(syncOptions{pass: pass, dryRun: true})
-			return syncActionMsg{action: action, msg: msg, err: err}
+			var preview []syncPreviewFile
+			msg, err := syncPullWithPreview(syncOptions{pass: pass, dryRun: true}, &preview)
+			return syncActionMsg{action: action, msg: msg, err: err, preview: preview}
 		case "forcepull":
 			msg, err := syncPull(syncOptions{pass: pass, force: true})
 			return syncActionMsg{action: action, msg: msg, err: err, reload: err == nil}
@@ -932,6 +941,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sync.err = ""
 			m.sync.msg = msg.msg
 			m.refreshSyncLine()
+			if msg.action == "preview" {
+				m.sync.preview = msg.preview
+				m.sync.previewScroll = 0
+				m.sync.mode = syncDiff
+			}
 		}
 		if msg.reload {
 			return m, m.reloadConfigFromDisk()
@@ -1307,13 +1321,15 @@ func (m tuiModel) syncItems() []syncItem {
 		return append(head,
 			syncItem{"push", "开始同步（首次推送）", "在 GitHub 建私有仓库，把配置加密后推上去；要设一个同步密码"},
 			syncItem{"pull", "从已有仓库拉取", "另一台设备推过之后，在这里输入同一个密码接上"},
+			syncItem{"tools", "管理各工具同步", "逐个选择本机要推送和拉取的工具配置"},
 		)
 	}
 	return append(head,
 		syncItem{"push", "推送本机配置", "把本机改动加密后推上去"},
 		syncItem{"pull", "拉取远端配置", "把远端较新的配置写回本机"},
-		syncItem{"preview", "预览远端会改哪些文件", "只解密看清单，不动本机文件"},
+		syncItem{"preview", "预览远端文件变更", "逐文件查看内容差异；不写本机，凭据内容隐藏"},
 		syncItem{"devices", "刷新设备列表", "从远端解密看一眼参与同步的设备，不动文件"},
+		syncItem{"tools", "管理各工具同步", "逐个选择本机要推送和拉取的工具配置"},
 		syncItem{"forcepush", "强制推送（覆盖远端）", "远端有别的设备的新版本时也拿本机覆盖"},
 		syncItem{"forcepull", "强制拉取（覆盖本机）", "本机有没推上去的改动也覆盖"},
 		syncItem{"addpath", "添加要同步的文件", "额外同步 config:… / home:… / ~/… 下的文件"},
@@ -1331,6 +1347,10 @@ func (m tuiModel) handleSyncKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSyncPassKey(k)
 	case syncPath:
 		return m.handleSyncPathKey(k)
+	case syncDiff:
+		return m.handleSyncPreviewKey(k)
+	case syncToolsMode:
+		return m.handleSyncToolsKey(k)
 	}
 
 	items := m.syncItems()
@@ -1366,6 +1386,121 @@ func (m tuiModel) handleSyncKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m tuiModel) handleSyncToolsKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	tools, err := syncableTools()
+	if err != nil {
+		m.sync.err = "读取可同步工具失败: " + err.Error()
+		return m, nil
+	}
+	if len(tools) == 0 {
+		m.sync.toolCursor, m.sync.toolScroll = 0, 0
+	} else {
+		m.sync.toolCursor = clampInt(m.sync.toolCursor, 0, len(tools)-1)
+		visible := m.syncToolsVisibleRows()
+		if m.sync.toolCursor < m.sync.toolScroll {
+			m.sync.toolScroll = m.sync.toolCursor
+		}
+		if m.sync.toolCursor >= m.sync.toolScroll+visible {
+			m.sync.toolScroll = m.sync.toolCursor - visible + 1
+		}
+	}
+
+	switch k.String() {
+	case "esc":
+		m.sync.mode = syncIdle
+		m.sync.err = ""
+		return m, nil
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.sync.toolCursor > 0 {
+			m.sync.toolCursor--
+		}
+	case "down", "j":
+		if m.sync.toolCursor < len(tools)-1 {
+			m.sync.toolCursor++
+		}
+	case "home":
+		m.sync.toolCursor = 0
+	case "end":
+		m.sync.toolCursor = max(len(tools)-1, 0)
+	case "enter":
+		if len(tools) == 0 {
+			return m, nil
+		}
+		st, err := loadSyncState()
+		if err != nil {
+			m.sync.err = "读取本机同步设置失败: " + err.Error()
+			return m, nil
+		}
+		t := tools[m.sync.toolCursor]
+		enabled := !syncToolEnabled(st, t.Key)
+		setSyncToolEnabled(&st, t.Key, enabled)
+		if _, err := saveSyncState(st); err != nil {
+			m.sync.err = "保存本机同步设置失败: " + err.Error()
+			return m, nil
+		}
+		m.sync.err = ""
+		if enabled {
+			m.sync.msg = t.Key + " 已开启本机推送和拉取"
+		} else {
+			m.sync.msg = t.Key + " 已关闭本机推送和拉取；远端数据保留"
+		}
+	}
+	if len(tools) > 0 {
+		visible := m.syncToolsVisibleRows()
+		if m.sync.toolCursor < m.sync.toolScroll {
+			m.sync.toolScroll = m.sync.toolCursor
+		}
+		if m.sync.toolCursor >= m.sync.toolScroll+visible {
+			m.sync.toolScroll = m.sync.toolCursor - visible + 1
+		}
+	}
+	return m, nil
+}
+
+func (m tuiModel) syncToolsVisibleRows() int {
+	if m.height <= 0 {
+		return 12
+	}
+	return max(m.height-14, 1)
+}
+
+func (m tuiModel) handleSyncPreviewKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	maxScroll := max(len(syncPreviewLines(m.sync.preview))-m.syncPreviewHeight(), 0)
+	switch k.String() {
+	case "esc", "enter":
+		m.sync.mode = syncIdle
+		m.sync.preview = nil
+		m.sync.previewScroll = 0
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		m.sync.previewScroll--
+	case "down", "j":
+		m.sync.previewScroll++
+	case "pgup", "b":
+		m.sync.previewScroll -= m.syncPreviewHeight()
+	case "pgdown", "f", " ":
+		m.sync.previewScroll += m.syncPreviewHeight()
+	case "home":
+		m.sync.previewScroll = 0
+	case "end":
+		m.sync.previewScroll = maxScroll
+	}
+	m.sync.previewScroll = clampInt(m.sync.previewScroll, 0, maxScroll)
+	return m, nil
+}
+
+func (m tuiModel) syncPreviewHeight() int {
+	if m.height <= 0 {
+		return 10
+	}
+	hints := m.viewHints("↑↓", "滚动", "pgup/pgdn", "翻页", "home/end", "跳转", "esc", "返回", "ctrl+c", "退出")
+	fixed := 8 + strings.Count(hints, "\n")
+	return max(m.height-fixed, 1)
+}
+
 func (m tuiModel) syncChoose(it syncItem) (tea.Model, tea.Cmd) {
 	switch it.action {
 	case "ghsetup":
@@ -1398,6 +1533,11 @@ func (m tuiModel) syncChoose(it syncItem) (tea.Model, tea.Cmd) {
 	case "addpath":
 		m.sync.mode = syncPath
 		m.sync.path = ""
+		m.sync.err, m.sync.msg = "", ""
+		return m, nil
+	case "tools":
+		m.sync.mode = syncToolsMode
+		m.sync.toolCursor, m.sync.toolScroll = 0, 0
 		m.sync.err, m.sync.msg = "", ""
 		return m, nil
 	case "off":
@@ -2840,9 +2980,112 @@ func (m tuiModel) viewAdd() string {
 	return b.String()
 }
 
+func (m tuiModel) viewSyncPreview() string {
+	w := m.contentWidth()
+	lines := syncPreviewLines(m.sync.preview)
+	budget := m.syncPreviewHeight()
+	start := clampInt(m.sync.previewScroll, 0, max(len(lines)-budget, 0))
+	end := min(start+budget, len(lines))
+
+	var b strings.Builder
+	b.WriteString(styles.Title.Render("同步变更预览") + "\n")
+	summaryStyle := styles.Good
+	if strings.Contains(m.sync.msg, "冲突") {
+		summaryStyle = styles.Warn
+	}
+	b.WriteString("  " + summaryStyle.Render(theme.Truncate(m.sync.msg, max(w-2, 8))) + "\n")
+	b.WriteString("  " + styles.Dim.Render("+ 远端新增 · - 本机将被替换；凭据文件内容会隐藏") + "\n\n")
+	for _, line := range lines[start:end] {
+		style := styles.Dim
+		switch {
+		case strings.HasPrefix(line, "    + "):
+			style = styles.Good
+		case strings.HasPrefix(line, "    - "):
+			style = styles.Warn
+		}
+		b.WriteString(theme.Truncate(style.Render(line), w-2) + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(m.viewHints("↑↓", "滚动", "pgup/pgdn", "翻页", "home/end", "跳转", "esc", "返回", "ctrl+c", "退出"))
+	return b.String()
+}
+
+func (m tuiModel) viewSyncTools() string {
+	w := m.contentWidth()
+	tools, err := syncableTools()
+	st, stErr := loadSyncState()
+	if err == nil {
+		err = stErr
+	}
+
+	var b strings.Builder
+	b.WriteString(m.withLogo(
+		styles.Title.Render("逐工具同步设置"),
+		styles.Dim.Render("仅保存在本机，不会同步到其他设备"),
+		styles.Dim.Render("关闭后本机跳过推送和拉取；远端数据保留"),
+	))
+	b.WriteString("\n")
+	if err != nil {
+		b.WriteString("  " + styles.Bad.Render(theme.Truncate("读取设置失败: "+err.Error(), max(w-2, 10))) + "\n")
+	} else if len(tools) == 0 {
+		b.WriteString("  " + styles.Dim.Render("当前没有声明同步路径的工具") + "\n")
+	} else {
+		m.sync.toolCursor = clampInt(m.sync.toolCursor, 0, len(tools)-1)
+		start := clampInt(m.sync.toolScroll, 0, max(len(tools)-1, 0))
+		visible := m.syncToolsVisibleRows()
+		if m.sync.toolCursor < start {
+			start = m.sync.toolCursor
+		}
+		if m.sync.toolCursor >= start+visible {
+			start = m.sync.toolCursor - visible + 1
+		}
+		end := min(start+visible, len(tools))
+		nameW := 0
+		for _, t := range tools {
+			nameW = max(nameW, lipgloss.Width(t.Key))
+		}
+		nameW = min(nameW, max(w/4, 10))
+		if start > 0 {
+			b.WriteString("  " + styles.Dim.Render(fmt.Sprintf("↑ 上面还有 %d 个", start)) + "\n")
+		}
+		for i := start; i < end; i++ {
+			t := tools[i]
+			marker, nameStyle := "  ", styles.Dim
+			if i == m.sync.toolCursor {
+				marker, nameStyle = styles.Accent.Render("▌ "), styles.Accent
+			}
+			state := styles.Good.Render("[开]")
+			if !syncToolEnabled(st, t.Key) {
+				state = styles.Dim.Render("[关]")
+			}
+			descW := max(w-2-nameW-12, 8)
+			b.WriteString("  " + marker + nameStyle.Render(theme.Pad(theme.Truncate(t.Key, nameW), nameW)) +
+				"  " + styles.Dim.Render(theme.Truncate(t.Desc, descW)) + "  " + state + "\n")
+		}
+		if end < len(tools) {
+			b.WriteString("  " + styles.Dim.Render(fmt.Sprintf("↓ 下面还有 %d 个", len(tools)-end)) + "\n")
+		}
+	}
+	if m.sync.msg != "" {
+		b.WriteString("\n  " + styles.Good.Render(theme.Truncate(m.sync.msg, max(w-2, 10))) + "\n")
+	}
+	if m.sync.err != "" {
+		b.WriteString("\n  " + styles.Bad.Render(theme.Truncate(m.sync.err, max(w-2, 10))) + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(m.viewHints("↑↓", "选择", "enter", "切换开关", "esc", "返回菜单", "ctrl+c", "退出"))
+	return b.String()
+}
+
 // viewSync 是多端同步页：上面是本机状态，下面是能做的事。
 // 密码在页面里掩码输入，只用于这一次 push/pull，不落到任何文件里。
 func (m tuiModel) viewSync() string {
+	if m.sync.mode == syncDiff {
+		return m.viewSyncPreview()
+	}
+	if m.sync.mode == syncToolsMode {
+		return m.viewSyncTools()
+	}
 	w := m.contentWidth()
 	st, stErr := loadSyncState()
 	items := m.syncItems()
@@ -2872,8 +3115,10 @@ func (m tuiModel) viewSync() string {
 		{"仓库", repo},
 		{"密钥", keyLine},
 	}
+	fileCountAdded := false
 	if names, err := syncNames(st); err == nil {
 		fields = append(fields, field{"文件", fmt.Sprintf("%d 个（含各工具自带的配置）", len(names))})
+		fileCountAdded = true
 	}
 	if len(st.ExtraPaths) > 0 {
 		fields = append(fields, field{"额外", strings.Join(st.ExtraPaths, "、")})
@@ -2883,6 +3128,13 @@ func (m tuiModel) viewSync() string {
 	}
 	if st.LastPull != "" {
 		fields = append(fields, field{"上次拉取", st.LastPull})
+	}
+	if len(st.Devices) > 0 && m.height > 0 && fileCountAdded {
+		// 矮屏先给设备名单留一行；菜单增加项目时，文件数可以暂时收起。
+		spaceWithFileCount := m.height - 2 - (logoRowsN + 1 + len(fields)) - (1 + len(items) + 4 + 1 + 1)
+		if spaceWithFileCount < 1 {
+			fields = fields[:len(fields)-1]
+		}
 	}
 	keyW := 4
 	for _, f := range fields {

@@ -305,6 +305,37 @@ func syncActionIndex(m tuiModel, action string) int {
 	return -1
 }
 
+func TestSyncPreviewPageScrollsAndFitsShortTerminal(t *testing.T) {
+	m := newTUIModel()
+	m.width, m.height = 100, 12
+	m.state = syncPage
+	file := syncPreviewFile{Name: "home:.config/example.yaml", Status: "变更"}
+	for i := 0; i < 20; i++ {
+		file.Diff = append(file.Diff, fmt.Sprintf("+ changed-line-%02d", i))
+	}
+	m.sync = syncView{mode: syncDiff, msg: "预览：会写入 1 个文件", preview: []syncPreviewFile{file}}
+
+	view := plainText(m.viewSync())
+	if !strings.Contains(view, "changed-line-00") || strings.Contains(view, "changed-line-03") {
+		t.Fatalf("预览页首屏窗口不正确:\n%s", view)
+	}
+	if got := strings.Count(m.viewSync(), "\n"); got > m.height {
+		t.Fatalf("短终端预览页占 %d 行，超过高度 %d", got, m.height)
+	}
+
+	updated, _ := m.handleSyncKey(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(tuiModel)
+	view = plainText(m.viewSync())
+	if !strings.Contains(view, "changed-line-03") || m.sync.previewScroll != 1 {
+		t.Fatalf("预览页没有随按键滚动:\n%s", view)
+	}
+	updated, _ = m.handleSyncKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.sync.mode != syncIdle || len(m.sync.preview) != 0 {
+		t.Fatal("按 esc 应返回同步菜单并清理预览数据")
+	}
+}
+
 // 同步页要把参与同步的设备列出来，本机那台标「这台」
 func TestSyncPageShowsDevices(t *testing.T) {
 	_, _, _ = setupSyncTest(t)
@@ -421,5 +452,87 @@ func TestSyncPageRefreshDevices(t *testing.T) {
 	}
 	if after.LastSHA != st.LastSHA {
 		t.Errorf("刷新不该动 LastSHA: %q -> %q", st.LastSHA, after.LastSHA)
+	}
+}
+
+func TestSyncToolSettingsAvailableAndPersistLocally(t *testing.T) {
+	fake, _, _ := setupSyncTest(t)
+	m := newTUIModel()
+	m.width, m.height = 100, 30
+	m.state = syncPage
+	m.sync = syncView{}
+
+	// 未连接仓库时也能进入逐工具设置。
+	idx := syncActionIndex(m, "tools")
+	if idx < 0 {
+		t.Fatal("首次同步菜单缺少逐工具设置")
+	}
+	updated, _ := m.syncChoose(m.syncItems()[idx])
+	m = updated.(tuiModel)
+	if m.sync.mode != syncToolsMode {
+		t.Fatalf("没有进入逐工具设置页: mode=%v", m.sync.mode)
+	}
+	view := plainText(m.viewSync())
+	for _, want := range []string{"逐工具同步设置", "argo-token", "[开]", "远端数据保留"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("逐工具设置页缺少 %q:\n%s", want, view)
+		}
+	}
+	updated, _ = m.handleSyncKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.sync.mode != syncIdle {
+		t.Fatal("esc 应返回同步菜单")
+	}
+
+	// 连上仓库后菜单仍保留同一入口。
+	writeSyncTestState(t, "fixture-passphrase")
+	m.sync = syncView{ghChecked: true, ghFound: true, ghLogin: true}
+	idx = syncActionIndex(m, "tools")
+	if idx < 0 {
+		t.Fatal("已连接同步菜单缺少逐工具设置")
+	}
+	updated, _ = m.syncChoose(m.syncItems()[idx])
+	m = updated.(tuiModel)
+
+	tools, err := syncableTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	argoIndex := -1
+	for i, tool := range tools {
+		if tool.Key == "argo-token" {
+			argoIndex = i
+			break
+		}
+	}
+	if argoIndex < 0 {
+		t.Fatal("测试所需的内置同步工具不在列表里")
+	}
+	m.sync.toolCursor = argoIndex
+	putsBefore := fake.puts
+	updated, _ = m.handleSyncKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	st, err := loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if syncToolEnabled(st, "argo-token") {
+		t.Fatal("TUI 关闭工具后没有写入本机禁用设置")
+	}
+	if !strings.Contains(plainText(m.viewSync()), "[关]") || !strings.Contains(m.sync.msg, "远端数据保留") {
+		t.Fatal("关闭后的状态和远端保留提示没有显示")
+	}
+	if fake.puts != putsBefore {
+		t.Fatal("本机逐工具偏好不应触发同步推送")
+	}
+
+	updated, _ = m.handleSyncKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	st, err = loadSyncState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !syncToolEnabled(st, "argo-token") || len(st.DisabledTools) != 0 {
+		t.Fatalf("重新开启后本机设置未恢复默认开启: %+v", st.DisabledTools)
 	}
 }
